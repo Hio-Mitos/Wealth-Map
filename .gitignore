@@ -1,0 +1,36 @@
+# Python bytecode / cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Linting / type-checker caches
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Packaging
+*.egg-info/
+build/
+dist/
+
+# Environment / secrets
+.env
+
+# App runtime data (created on the user's machine, not source)
+WealthMap/
+*.db
+*.sqlite
+*.sqlite3
+attachments/
+
+# Editor / OS cruft
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
