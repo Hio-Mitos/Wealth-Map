@@ -140,6 +140,291 @@ def attach_currency_tooltip(combo: ctk.CTkComboBox, ctx):
     Tooltip(combo, lambda: currency_tooltip_text(ctx, combo.get()))
 
 
+# ── Searchable Currency Picker ──────────────────────────────────────────────────
+
+# Extra search terms for currencies whose common nationality adjective
+# doesn't literally appear in their code/name/common_name/country text —
+# e.g. "american" doesn't appear anywhere in USD's data (country is
+# "United States"), so without this, typing "american dollar" would find
+# nothing. Deliberately not exhaustive: currencies not listed here still
+# search fine by code, name, common nickname, and country as-is (e.g.
+# "Naira" or "Nigeria" both already find NGN with no alias needed).
+CURRENCY_SEARCH_ALIASES = {
+    "USD": ["american", "usa", "us"],
+    "EUR": ["european", "europe"],
+    "GBP": ["british", "britain", "england", "english", "uk"],
+    "JPY": ["japanese"],
+    "CHF": ["swiss"],
+    "CAD": ["canadian"],
+    "AUD": ["australian"],
+    "NZD": ["kiwi"],
+    "CNY": ["chinese", "china", "renminbi", "rmb"],
+    "INR": ["indian"],
+    "ZAR": ["south african"],
+    "MXN": ["mexican"],
+    "BRL": ["brazilian"],
+    "RUB": ["russian"],
+    "KRW": ["korean", "south korean"],
+    "SAR": ["saudi"],
+    "AED": ["emirati", "dubai"],
+    "TRY": ["turkish"],
+    "SGD": ["singaporean"],
+    "HKD": ["hong konger"],
+    "SEK": ["swedish"],
+    "NOK": ["norwegian"],
+    "DKK": ["danish"],
+    "PLN": ["polish"],
+    "THB": ["thai"],
+    "IDR": ["indonesian"],
+    "MYR": ["malaysian"],
+    "VND": ["vietnamese"],
+    "PHP": ["filipino", "philippine"],
+    "NGN": ["nigerian"],
+    "KES": ["kenyan"],
+    "EGP": ["egyptian"],
+    "ILS": ["israeli"],
+    "PKR": ["pakistani"],
+    "BDT": ["bangladeshi"],
+}
+
+
+class CurrencySearchEntry(ctk.CTkEntry):
+    """
+    A currency picker styled like a normal text field, with live
+    search-as-you-type across each currency's code, official name, common
+    nickname, issuing country, and a few nationality aliases (see
+    CURRENCY_SEARCH_ALIASES) — so typing "dollar" surfaces every
+    dollar-named currency, "USD" finds it directly, and "american dollar"
+    narrows the list to just USD.
+
+    `.get()` always returns a plain, valid currency code (never
+    unresolved free text) and `.set(code)` sets it — a drop-in
+    replacement anywhere a `make_combo([...codes...])` was used for
+    currency selection.
+    """
+    _MAX_VISIBLE_ROWS = 8
+
+    def __init__(self, parent, ctx, width: int = 160, initial_code: Optional[str] = None,
+                 on_pick: Optional[Callable[[str], None]] = None, **kw):
+        self._ctx = ctx
+        self._on_pick = on_pick
+        self._currencies = list(ctx.currency.get_all())  # already ordered by code
+        self._by_code = {c.code: c for c in self._currencies}
+        self._current_code = initial_code if initial_code in self._by_code else (
+            self._currencies[0].code if self._currencies else "")
+
+        super().__init__(
+            parent, width=width, height=36,
+            fg_color=theme.BG_INPUT, border_color=theme.BORDER,
+            text_color=theme.TEXT_PRI, placeholder_text_color=theme.TEXT_SEC,
+            font=("Segoe UI", 12), **kw
+        )
+        if self._current_code:
+            self.insert(0, self._current_code)
+
+        self._popup = None
+        self._filtered: List = []
+        self._highlight_idx = -1
+
+        self.bind("<KeyRelease>", self._on_key, add="+")
+        self.bind("<FocusIn>", self._on_focus_in, add="+")
+        self.bind("<FocusOut>", self._on_focus_out, add="+")
+        self.bind("<Down>", self._on_arrow_down, add="+")
+        self.bind("<Up>", self._on_arrow_up, add="+")
+        self.bind("<Return>", self._on_return, add="+")
+        self.bind("<Escape>", self._on_escape, add="+")
+        self.bind("<Destroy>", lambda e: self._close_popup(), add="+")
+
+    # ── Public API ───────────────────────────────────────────────────────
+
+    def get(self) -> str:
+        return self._current_code
+
+    def set(self, code: str):
+        cur = self._by_code.get(code)
+        if not cur:
+            return
+        self._current_code = code
+        self.delete(0, "end")
+        self.insert(0, code)
+        self._close_popup()
+
+    def resolve(self):
+        """Forces whatever's currently typed to resolve to a valid code
+        (best match, or reverts to the last valid one) without waiting
+        for the field to lose focus first. Call this before reading
+        .get() from a button handler (e.g. Save) in case the field still
+        has focus with unresolved search text in it."""
+        self._validate_and_close()
+
+    def raw_text(self) -> str:
+        """The literal text currently typed in the field (may not be a
+        valid code yet, e.g. mid-search)."""
+        return ctk.CTkEntry.get(self)
+
+    # ── Search / ranking ─────────────────────────────────────────────────
+
+    def _haystack(self, cur) -> str:
+        parts = [cur.code, cur.name, cur.common_name or "", cur.country or ""]
+        parts.extend(CURRENCY_SEARCH_ALIASES.get(cur.code, []))
+        return " ".join(parts).lower()
+
+    def _rank(self, cur, query_lower: str, words: List[str]) -> Optional[int]:
+        haystack = self._haystack(cur)
+        if not all(w in haystack for w in words):
+            return None
+        if cur.code.lower() == query_lower:
+            return 0
+        if cur.code.lower().startswith(query_lower):
+            return 1
+        if cur.name.lower().startswith(query_lower):
+            return 2
+        if (cur.common_name or "").lower().startswith(query_lower):
+            return 3
+        return 4
+
+    def _filter(self, query: str) -> List:
+        query = query.strip()
+        if not query:
+            return self._currencies
+        words = query.lower().split()
+        scored = []
+        for cur in self._currencies:
+            rank = self._rank(cur, query.lower(), words)
+            if rank is not None:
+                scored.append((rank, cur.code, cur))
+        scored.sort(key=lambda t: (t[0], t[1]))
+        return [t[2] for t in scored]
+
+    # ── Popup ────────────────────────────────────────────────────────────
+
+    def _on_key(self, event=None):
+        if event is not None and event.keysym in ("Up", "Down", "Return", "Escape", "Tab"):
+            return
+        self._filtered = self._filter(self.raw_text())
+        self._highlight_idx = 0 if self._filtered else -1
+        self._render_popup()
+
+    def _on_focus_in(self, event=None):
+        try:
+            self.select_range(0, "end")
+        except Exception:
+            pass
+        self._filtered = self._filter(self.raw_text())
+        self._highlight_idx = 0 if self._filtered else -1
+        self._render_popup()
+
+    def _on_focus_out(self, event=None):
+        # Delay so a click on a popup row (which briefly steals focus)
+        # gets to fire its own handler first.
+        try:
+            self.after(150, self._validate_and_close)
+        except Exception:
+            self._close_popup()
+
+    def _validate_and_close(self):
+        typed = self.raw_text()
+        if typed != self._current_code:
+            filtered = self._filter(typed)
+            if typed and filtered:
+                self.set(filtered[0].code)
+            else:
+                self.set(self._current_code)
+        self._close_popup()
+
+    def _on_arrow_down(self, event=None):
+        if not self._popup:
+            self._on_key()
+            return "break"
+        self._highlight_idx = min(self._highlight_idx + 1,
+                                  min(len(self._filtered), self._MAX_VISIBLE_ROWS) - 1)
+        self._render_popup()
+        return "break"
+
+    def _on_arrow_up(self, event=None):
+        if not self._popup:
+            return "break"
+        self._highlight_idx = max(self._highlight_idx - 1, 0)
+        self._render_popup()
+        return "break"
+
+    def _on_return(self, event=None):
+        if self._filtered:
+            idx = max(self._highlight_idx, 0)
+            self._pick(self._filtered[idx].code)
+        return "break"
+
+    def _on_escape(self, event=None):
+        self.set(self._current_code)
+        self._close_popup()
+        return "break"
+
+    def _pick(self, code: str):
+        self.set(code)
+        if self._on_pick:
+            try:
+                self._on_pick(code)
+            except Exception:
+                pass
+
+    def _render_popup(self):
+        self._close_popup()
+        if not self._filtered:
+            return
+        try:
+            x = self.winfo_rootx()
+            y = self.winfo_rooty() + self.winfo_height()
+        except Exception:
+            return
+
+        self._popup = tk.Toplevel(self)
+        self._popup.wm_overrideredirect(True)
+        self._popup.wm_geometry(f"+{x}+{y}")
+        try:
+            self._popup.attributes("-topmost", True)
+        except Exception:
+            pass
+
+        outer = tk.Frame(self._popup, bg=theme.BORDER, highlightthickness=0)
+        outer.pack()
+        inner = tk.Frame(outer, bg=theme.BG_CARD)
+        inner.pack(padx=1, pady=1)
+
+        shown = self._filtered[:self._MAX_VISIBLE_ROWS]
+        for i, cur in enumerate(shown):
+            is_hl = (i == self._highlight_idx)
+            row_bg = theme.BG_SELECTED if is_hl else theme.BG_CARD
+            label_text = f"{cur.code}  —  {cur.name}"
+            if cur.common_name:
+                label_text += f"  ({cur.common_name})"
+            row = tk.Frame(inner, bg=row_bg, cursor="hand2")
+            row.pack(fill="x")
+            lbl = tk.Label(row, text=label_text, bg=row_bg, fg=theme.TEXT_PRI,
+                           font=("Segoe UI", 11), anchor="w", padx=10, pady=6, width=40)
+            lbl.pack(fill="x")
+            for w in (row, lbl):
+                w.bind("<Button-1>", lambda e, code=cur.code: self._pick(code))
+                w.bind("<Enter>", lambda e, idx=i: self._set_highlight(idx))
+
+        if len(self._filtered) > self._MAX_VISIBLE_ROWS:
+            more = len(self._filtered) - self._MAX_VISIBLE_ROWS
+            tk.Label(inner, text=f"+{more} more — keep typing to narrow it down",
+                    bg=theme.BG_CARD, fg=theme.TEXT_SEC, font=("Segoe UI", 9),
+                    anchor="w", padx=10, pady=4).pack(fill="x")
+
+    def _set_highlight(self, idx: int):
+        self._highlight_idx = idx
+        self._render_popup()
+
+    def _close_popup(self):
+        if self._popup is not None:
+            try:
+                self._popup.destroy()
+            except Exception:
+                pass
+            self._popup = None
+
+
 # ── Section Header ─────────────────────────────────────────────────────────────
 
 class SectionHeader(ctk.CTkFrame):

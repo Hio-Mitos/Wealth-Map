@@ -12,6 +12,8 @@ from src.ui.widgets import (
     make_entry,
     make_combo,
     Modal,
+    CurrencySearchEntry,
+    attach_currency_tooltip,
 )
 from src.ui.theme import theme
 from src.services.backup_service import GoogleDriveBackupService
@@ -51,7 +53,9 @@ class SettingsPanel(ctk.CTkFrame):
 
         # ── Base Currency ──────────────────────────────────────────────────────
         self._section(scroll, row=next_row(), title="Base Currency",
-                      desc="All balances and net worth are converted to this currency.")
+                      desc="All balances and net worth are converted to this currency. "
+                           "Start typing a code, name, or nickname (e.g. \"dollar\" or "
+                           "\"american dollar\") to search.")
 
         cur_card = ctk.CTkFrame(scroll, fg_color=theme.BG_CARD, corner_radius=12,
                                 border_width=1, border_color=theme.BORDER)
@@ -60,11 +64,10 @@ class SettingsPanel(ctk.CTkFrame):
         crow = ctk.CTkFrame(cur_card, fg_color="transparent")
         crow.pack(fill="x", padx=16, pady=16)
 
-        currencies = [c.code for c in self.ctx.currency.get_all()]
-        self._base_combo = make_combo(crow, currencies, width=160)
         current_base = self.ctx.settings.get("base_currency", "USD")
-        self._base_combo.set(current_base)
+        self._base_combo = CurrencySearchEntry(crow, self.ctx, width=220, initial_code=current_base)
         self._base_combo.pack(side="left")
+        attach_currency_tooltip(self._base_combo, self.ctx)
 
         ctk.CTkButton(crow, text="Save", width=80, height=36,
                       fg_color=theme.ACCENT, hover_color="#1C6FBF",
@@ -449,6 +452,7 @@ class SettingsPanel(ctk.CTkFrame):
                          font=("Segoe UI", 11), text_color=theme.TEXT_SEC).pack(anchor="w")
 
     def _save_base_currency(self):
+        self._base_combo.resolve()  # in case the field still has focus with unresolved search text
         code = self._base_combo.get()
         self.ctx.settings.set("base_currency", code)
         self.app.refresh()
