@@ -318,10 +318,45 @@ a spreadsheet.
 
 ---
 
+## ☁️ Google Drive Backup & Restore
+
+Settings → **Backup & Sync** can back up your *entire* data root (every
+profile — databases and attachments, not just the one you're currently in)
+straight to your own Google Drive, encrypted, so you can pick everything back
+up on a new PC. This talks to Google Drive directly (like WhatsApp backing up
+to Drive on Android) — it does **not** require the Google Drive desktop app.
+
+**One-time setup — create your own Google OAuth client** (WealthMap doesn't
+ship a shared one, so this step is required once, by you):
+
+1. Go to [console.cloud.google.com](https://console.cloud.google.com/) and
+   create a new project (any name).
+2. **APIs & Services → Library** → enable the **Google Drive API**.
+3. **APIs & Services → OAuth consent screen** → choose **External**, fill in
+   an app name/support email, and add yourself as a test user.
+4. **APIs & Services → Credentials → Create Credentials → OAuth client ID**
+   → application type **Desktop app**.
+5. Download the resulting JSON file (it's your `client_secret.json`) and keep
+   it somewhere you can find again — you'll need the *same* file if you ever
+   reconnect on another computer.
+
+**Then in WealthMap**: Settings → Backup & Sync → **Connect Google Drive**
+(pick that JSON file, sign in when your browser opens) → **Set Password**
+(this encrypts every backup; WealthMap never stores it) → tick which
+triggers you want (data changes / once a day / on close — any combination)
+→ **Save**.
+
+**Restoring on a new PC**: on the profile picker screen (before opening any
+profile), click **Restore from Google Drive**, sign in with the same
+`client_secret.json`, pick a backup, and enter your backup password. Nothing
+needs to exist locally beforehand — the password is all that's required.
+
+---
+
 ## 🔮 Roadmap (Future Versions)
 
 - **v4**: Optional encrypted DB, password lock
-- **v5**: Cloud sync (Dropbox / Google Drive)
+- **v5**: ✅ Cloud sync (Google Drive) — see above
 - **v6**: Mobile companion app
 - **v7**: Budget planning & goal tracking
 - **v8**: AI-powered spending insights
