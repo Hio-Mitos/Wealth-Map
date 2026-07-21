@@ -94,6 +94,16 @@ class WealthMapApp(ctk.CTk):
         self.after(1500, self.ctx.fetch_rates_background)
         self.after(3000, self._update_status_bar)
 
+        # Google Drive backup: offer to unlock this session (once) if
+        # automatic backups are configured, then let the daily trigger
+        # check for itself whether it's actually due.
+        self.after(2000, self._maybe_prompt_backup_unlock)
+
+        # Ask the window manager to route the close ("X") button through
+        # us so an on-close backup can run first, instead of just tearing
+        # the window down immediately.
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
         # Responsive: notify current panel on resize
         self.bind("<Configure>", self._on_resize)
 
@@ -375,6 +385,81 @@ class WealthMapApp(ctk.CTk):
     def refresh(self):
         """Called by child panels after data mutations."""
         self._update_net_worth()
+
+    # ── Google Drive backup ──────────────────────────────────────────────────
+
+    def _maybe_prompt_backup_unlock(self):
+        """If automatic backups are configured (connected + password set +
+        at least one trigger on) but not yet unlocked for this run of the
+        app, ask once for the password. Declining just means automatic
+        backups sit out this session — nothing is forced."""
+        backup = self.ctx.backup
+        if not backup:
+            return
+        if backup.is_unlocked:
+            backup.maybe_daily_backup()
+            return
+        if not (backup.is_connected() and backup.config.has_password and backup.config.triggers):
+            return
+
+        from src.ui.widgets import Modal
+        from src.ui.theme import theme
+
+        modal = Modal(self, "Unlock Google Drive Backups", width=420, height=260)
+        ctk.CTkLabel(modal.body, text="Enter your backup password to enable automatic "
+                                       "backups for this session. This isn't stored — "
+                                       "you'll be asked again next time you open WealthMap.",
+                     font=("Segoe UI", 12), text_color=theme.TEXT_SEC,
+                     wraplength=360, justify="left").pack(anchor="w", pady=(0, 12))
+        from src.ui.widgets import make_entry
+        pw_entry = make_entry(modal.body, placeholder="Backup password", show="•")
+        pw_entry.pack(fill="x")
+
+        def try_unlock():
+            pw = pw_entry.get()
+            if not pw:
+                return
+            try:
+                if backup.verify_and_unlock(pw):
+                    modal.destroy()
+                    backup.maybe_daily_backup()
+                else:
+                    messagebox.showerror("Incorrect Password",
+                                         "That doesn't match your backup password.", parent=modal)
+            except Exception as e:
+                messagebox.showerror("Error", str(e), parent=modal)
+
+        modal.add_buttons("Unlock", try_unlock, cancel_text="Not now")
+
+    def _on_close(self):
+        """Routed here via WM_DELETE_WINDOW so an on-close backup (if
+        enabled) gets a chance to run before the window actually goes
+        away. Bounded by a short timeout so a slow/failed upload can
+        never prevent the app from closing."""
+        backup = self.ctx.backup
+        if backup and "on_close" in backup.config.triggers and backup.is_unlocked:
+            overlay = None
+            try:
+                from src.ui.widgets import LoadingOverlay
+                overlay = LoadingOverlay(self.content_frame, label="Backing up to Google Drive")
+                overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+                self.update_idletasks()
+            except Exception:
+                overlay = None
+            try:
+                backup.backup_on_close_blocking(timeout=8.0)
+            except Exception:
+                pass
+            if overlay:
+                try:
+                    overlay.stop()
+                except Exception:
+                    pass
+        self.switch_profile_requested = False
+        self.target_profile_id = None
+        self.withdraw()
+        self.update_idletasks()
+        self.quit()
 
     def switch_profile(self):
         """Close this window and return to the profile launcher."""

@@ -40,6 +40,14 @@ class ProfileRegistry:
 
     # ── Persistence ──────────────────────────────────────────────────────
 
+    def reload(self):
+        """Re-reads profiles.json from disk and re-runs the legacy-install
+        migration check. Used after something external to this instance
+        changed the data root — e.g. a Google Drive restore just wrote a
+        new profiles.json/profiles/ directly onto disk."""
+        self._load()
+        self._migrate_legacy()
+
     def _load(self):
         if self.registry_path.exists():
             try:

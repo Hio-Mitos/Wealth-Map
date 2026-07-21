@@ -1502,6 +1502,23 @@ class AppContext:
         from src.services.market_data import MarketDataService
         self.market_data = MarketDataService()
 
+        # Google Drive backup (needs the profile *registry*, not just this
+        # profile's session, since a backup covers every profile under the
+        # data root). Only available when we actually have a registry —
+        # e.g. not for standalone scripts/tests that construct AppContext
+        # directly against a bare data_dir.
+        self.backup = None
+        if self.registry is not None:
+            from src.services.backup_service import GoogleDriveBackupService
+            self.backup = GoogleDriveBackupService(self.registry)
+            from sqlalchemy import event as _sa_event
+
+            def _on_commit(_session):
+                if self.backup:
+                    self.backup.mark_dirty()
+
+            _sa_event.listen(self.session, "after_commit", _on_commit)
+
         self._first_run()
 
         # Apply saved theme preference (UI reads this before building widgets)

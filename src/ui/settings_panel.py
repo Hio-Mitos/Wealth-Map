@@ -5,11 +5,13 @@ WealthMap – Settings Panel
 import tkinter as tk
 from tkinter import messagebox
 import customtkinter as ctk
+from datetime import datetime
 
 from src.ui.widgets import (
     SectionHeader,
     make_entry,
-    make_combo
+    make_combo,
+    Modal,
 )
 from src.ui.theme import theme
 
@@ -170,6 +172,17 @@ class SettingsPanel(ctk.CTkFrame):
                       fg_color="transparent", border_color=theme.RED, border_width=1,
                       text_color=theme.RED, font=("Segoe UI", 12),
                       command=self._reset_data).pack(side="left")
+
+        # ── Backup & Sync (Google Drive) ─────────────────────────────────────
+        self._section(scroll, row=next_row(), title="Backup & Sync",
+                      desc="Automatically back up ALL your profiles (accounts, transactions, "
+                           "attachments — everything) to your own Google Drive, so you can "
+                           "restore them on a new computer.")
+        backup_card = ctk.CTkFrame(scroll, fg_color=theme.BG_CARD, corner_radius=12,
+                                   border_width=1, border_color=theme.BORDER)
+        backup_card.grid(row=next_row(), column=0, sticky="ew", pady=(0, 20))
+        self._backup_card = backup_card
+        self._build_backup_section(backup_card)
 
         # ── About ──────────────────────────────────────────────────────────────
         self._section(scroll, row=next_row(), title="About WealthMap",
@@ -527,3 +540,268 @@ class SettingsPanel(ctk.CTkFrame):
             self.app.navigate("dashboard")
         except Exception as e:
             messagebox.showerror("Reset Error", str(e))
+
+    # ── Backup & Sync (Google Drive) ────────────────────────────────────────
+
+    def _build_backup_section(self, card):
+        for w in card.winfo_children():
+            w.destroy()
+
+        backup = self.ctx.backup
+        if backup is None:
+            ctk.CTkLabel(card, text="Backup isn't available in this context.",
+                         font=("Segoe UI", 11), text_color=theme.TEXT_SEC
+                         ).pack(anchor="w", padx=16, pady=16)
+            return
+
+        # ── Connection status ────────────────────────────────────────────
+        status_row = ctk.CTkFrame(card, fg_color="transparent")
+        status_row.pack(fill="x", padx=16, pady=(16, 4))
+        connected = backup.is_connected()
+        status_text = "✅ Connected to Google Drive" if connected else "○ Not connected"
+        status_color = theme.GREEN if connected else theme.TEXT_SEC
+        ctk.CTkLabel(status_row, text=status_text, font=("Segoe UI", 13, "bold"),
+                     text_color=status_color).pack(side="left")
+
+        btn_row = ctk.CTkFrame(card, fg_color="transparent")
+        btn_row.pack(fill="x", padx=16, pady=(0, 12))
+        if connected:
+            ctk.CTkButton(btn_row, text="Disconnect", width=120, height=32,
+                          fg_color="transparent", border_color=theme.RED, border_width=1,
+                          text_color=theme.RED, font=("Segoe UI", 11),
+                          command=self._gdrive_disconnect).pack(side="left")
+        else:
+            ctk.CTkLabel(card, text="Backups use your own Google account directly — no "
+                                     "Google Drive desktop app needed. First time only, "
+                                     "you'll need a free Google Cloud OAuth client ("
+                                     "\"client_secret.json\"). Ask me for step-by-step help "
+                                     "setting that up if you haven't already.",
+                         font=("Segoe UI", 11), text_color=theme.TEXT_SEC,
+                         wraplength=700, justify="left").pack(anchor="w", padx=16, pady=(0, 8))
+            ctk.CTkButton(btn_row, text="Connect Google Drive", width=180, height=32,
+                          fg_color=theme.ACCENT, hover_color="#1C6FBF", text_color="#fff",
+                          font=("Segoe UI", 11),
+                          command=self._gdrive_connect).pack(side="left")
+
+        ctk.CTkFrame(card, height=1, fg_color=theme.BORDER).pack(fill="x", padx=16, pady=8)
+
+        # ── Password ─────────────────────────────────────────────────────
+        pw_row = ctk.CTkFrame(card, fg_color="transparent")
+        pw_row.pack(fill="x", padx=16, pady=4)
+        pw_status = "🔒 Password set" if backup.config.has_password else "⚠️ No backup password set yet"
+        unlock_status = "  •  unlocked this session" if backup.is_unlocked else ""
+        ctk.CTkLabel(pw_row, text=pw_status + unlock_status, font=("Segoe UI", 12),
+                     text_color=theme.TEXT_PRI if backup.config.has_password else theme.GOLD
+                     ).pack(side="left")
+
+        pw_btn_row = ctk.CTkFrame(card, fg_color="transparent")
+        pw_btn_row.pack(fill="x", padx=16, pady=(0, 12))
+        ctk.CTkLabel(card, text="Backups are encrypted with this password before they leave "
+                                 "your computer — WealthMap never stores it, so write it down "
+                                 "somewhere safe. You'll need it to restore on a new PC.",
+                     font=("Segoe UI", 10), text_color=theme.TEXT_SEC,
+                     wraplength=700, justify="left").pack(anchor="w", padx=16, pady=(0, 8))
+        ctk.CTkButton(pw_btn_row,
+                      text="Change Password" if backup.config.has_password else "Set Password",
+                      width=160, height=32, fg_color="transparent",
+                      border_color=theme.BORDER, border_width=1,
+                      text_color=theme.ACCENT, font=("Segoe UI", 11),
+                      command=self._gdrive_set_password).pack(side="left", padx=(0, 8))
+        if backup.config.has_password and not backup.is_unlocked:
+            ctk.CTkButton(pw_btn_row, text="Unlock This Session", width=160, height=32,
+                          fg_color="transparent", border_color=theme.BORDER, border_width=1,
+                          text_color=theme.ACCENT, font=("Segoe UI", 11),
+                          command=self._gdrive_unlock).pack(side="left")
+
+        ctk.CTkFrame(card, height=1, fg_color=theme.BORDER).pack(fill="x", padx=16, pady=8)
+
+        # ── Triggers (multiple can be on at once) ───────────────────────────
+        ctk.CTkLabel(card, text="Back up automatically when:", font=("Segoe UI", 12, "bold"),
+                     text_color=theme.TEXT_PRI).pack(anchor="w", padx=16, pady=(4, 4))
+        trig_frame = ctk.CTkFrame(card, fg_color="transparent")
+        trig_frame.pack(fill="x", padx=16, pady=(0, 8))
+
+        current_triggers = set(backup.config.triggers)
+        self._trigger_vars = {}
+        trigger_labels = [
+            ("on_change", "My data changes (a minute or so after the last edit)"),
+            ("daily",     "Once a day"),
+            ("on_close",  "I close WealthMap"),
+        ]
+        for key, label in trigger_labels:
+            var = tk.BooleanVar(value=key in current_triggers)
+            ctk.CTkCheckBox(trig_frame, text=label, variable=var,
+                           font=("Segoe UI", 12), text_color=theme.TEXT_PRI,
+                           fg_color=theme.ACCENT).pack(anchor="w", pady=3)
+            self._trigger_vars[key] = var
+
+        ctk.CTkButton(card, text="Save", width=100, height=32,
+                      fg_color=theme.ACCENT, hover_color="#1C6FBF", text_color="#fff",
+                      font=("Segoe UI", 11),
+                      command=self._gdrive_save_triggers).pack(anchor="w", padx=16, pady=(0, 12))
+
+        ctk.CTkFrame(card, height=1, fg_color=theme.BORDER).pack(fill="x", padx=16, pady=8)
+
+        # ── Manual backup + status ──────────────────────────────────────────
+        last_at = backup.config.get("last_backup_at")
+        last_err = backup.config.get("last_backup_error")
+        if last_at:
+            try:
+                dt = datetime.fromisoformat(last_at)
+                last_text = f"Last backup: {dt.strftime('%d %b %Y, %H:%M')} UTC"
+            except Exception:
+                last_text = f"Last backup: {last_at}"
+        else:
+            last_text = "No backup has been made yet."
+        ctk.CTkLabel(card, text=last_text, font=("Segoe UI", 11), text_color=theme.TEXT_SEC
+                     ).pack(anchor="w", padx=16, pady=(4, 0))
+        if last_err:
+            ctk.CTkLabel(card, text=f"Last attempt failed: {last_err}", font=("Segoe UI", 11),
+                         text_color=theme.RED, wraplength=700, justify="left"
+                         ).pack(anchor="w", padx=16, pady=(2, 0))
+
+        self._backup_status_label = ctk.CTkLabel(card, text="", font=("Segoe UI", 11),
+                                                  text_color=theme.ACCENT)
+        self._backup_status_label.pack(anchor="w", padx=16, pady=(4, 0))
+
+        manual_row = ctk.CTkFrame(card, fg_color="transparent")
+        manual_row.pack(fill="x", padx=16, pady=(8, 16))
+        ctk.CTkButton(manual_row, text="⬆ Back Up Now", width=140, height=36,
+                      fg_color=theme.ACCENT2, hover_color=theme.BG_SELECTED, text_color="#fff",
+                      font=("Segoe UI", 12), command=self._gdrive_backup_now).pack(side="left")
+        ctk.CTkLabel(manual_row, text="Restoring a backup (e.g. on a new PC) is done from the "
+                                       "profile picker screen — use Switch Profile below, then "
+                                       "\"Restore from Google Drive\" there.",
+                     font=("Segoe UI", 10), text_color=theme.TEXT_SEC,
+                     wraplength=520, justify="left").pack(side="left", padx=12)
+
+    def _gdrive_connect(self):
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(
+            title="Select your Google OAuth client_secret.json",
+            filetypes=[("JSON", "*.json"), ("All files", "*.*")]
+        )
+        if not path:
+            return
+        backup = self.ctx.backup
+        self._set_backup_status("Opening browser to sign in to Google…")
+
+        def done(err):
+            if err:
+                self.after(0, lambda: messagebox.showerror("Connection Failed", str(err), parent=self))
+            else:
+                self.after(0, lambda: self._rebuild_backup_section())
+
+        def run():
+            try:
+                backup.connect(path)
+                done(None)
+            except Exception as e:
+                done(e)
+
+        import threading
+        threading.Thread(target=run, daemon=True).start()
+
+    def _gdrive_disconnect(self):
+        if not messagebox.askyesno("Disconnect Google Drive",
+                                   "Stop backing up to this Google account? Existing backups "
+                                   "already on Drive are not deleted.", parent=self):
+            return
+        self.ctx.backup.disconnect()
+        self._rebuild_backup_section()
+
+    def _gdrive_set_password(self):
+        modal = Modal(self, "Set Backup Password", width=420, height=300)
+        ctk.CTkLabel(modal.body, text="Choose a password to encrypt your backups with. "
+                                       "WealthMap never stores it — you'll need it again "
+                                       "to restore on a new PC, so keep it somewhere safe.",
+                     font=("Segoe UI", 12), text_color=theme.TEXT_SEC,
+                     wraplength=360, justify="left").pack(anchor="w", pady=(0, 12))
+        pw1 = make_entry(modal.body, placeholder="New password", show="•")
+        pw1.pack(fill="x", pady=(0, 8))
+        pw2 = make_entry(modal.body, placeholder="Confirm password", show="•")
+        pw2.pack(fill="x")
+
+        def save():
+            p1, p2 = pw1.get(), pw2.get()
+            if not p1:
+                messagebox.showerror("Error", "Password can't be empty.", parent=modal)
+                return
+            if p1 != p2:
+                messagebox.showerror("Error", "Passwords don't match.", parent=modal)
+                return
+            self.ctx.backup.set_password(p1)
+            modal.destroy()
+            self._rebuild_backup_section()
+
+        modal.add_buttons("Save", save)
+
+    def _gdrive_unlock(self):
+        modal = Modal(self, "Unlock Backups", width=400, height=220)
+        ctk.CTkLabel(modal.body, text="Enter your backup password to unlock automatic "
+                                       "backups for this session.",
+                     font=("Segoe UI", 12), text_color=theme.TEXT_SEC,
+                     wraplength=340, justify="left").pack(anchor="w", pady=(0, 12))
+        pw = make_entry(modal.body, placeholder="Backup password", show="•")
+        pw.pack(fill="x")
+
+        def try_unlock():
+            try:
+                if self.ctx.backup.verify_and_unlock(pw.get()):
+                    modal.destroy()
+                    self._rebuild_backup_section()
+                else:
+                    messagebox.showerror("Incorrect Password", "That doesn't match.", parent=modal)
+            except Exception as e:
+                messagebox.showerror("Error", str(e), parent=modal)
+
+        modal.add_buttons("Unlock", try_unlock, cancel_text="Cancel")
+
+    def _gdrive_save_triggers(self):
+        selected = [k for k, v in self._trigger_vars.items() if v.get()]
+        self.ctx.backup.config.set_triggers(selected)
+        if selected and not self.ctx.backup.is_unlocked and self.ctx.backup.config.has_password:
+            messagebox.showinfo("Saved", "Triggers saved. Unlock this session (below) so "
+                                          "automatic backups can actually run.", parent=self)
+        self._rebuild_backup_section()
+
+    def _gdrive_backup_now(self):
+        backup = self.ctx.backup
+        if not backup.is_connected():
+            messagebox.showinfo("Not Connected", "Connect Google Drive first.", parent=self)
+            return
+        if not backup.is_unlocked:
+            if not backup.config.has_password:
+                messagebox.showinfo("No Password Set", "Set a backup password first.", parent=self)
+                return
+            self._gdrive_unlock()
+            if not backup.is_unlocked:
+                return
+
+        self._set_backup_status("Backing up…")
+
+        def done(err):
+            if err:
+                self.after(0, lambda: messagebox.showerror("Backup Failed", str(err), parent=self))
+            self.after(0, self._rebuild_backup_section)
+
+        backup.backup_now_async(on_done=done)
+
+    def _set_backup_status(self, text):
+        if hasattr(self, "_backup_status_label"):
+            try:
+                self._backup_status_label.configure(text=text)
+            except Exception:
+                pass
+
+    def _rebuild_backup_section(self):
+        if getattr(self, "_backup_card", None) is not None:
+            try:
+                self._build_backup_section(self._backup_card)
+                return
+            except Exception:
+                pass
+        # Fallback: just rebuild the whole panel
+        for w in self.winfo_children():
+            w.destroy()
+        self._build()

@@ -9,10 +9,11 @@ import tkinter as tk
 from tkinter import messagebox, simpledialog
 import customtkinter as ctk
 from datetime import datetime
+from pathlib import Path
 
 from src.ui.theme import theme
-from src.ui.widgets import make_entry, make_combo, Modal, LoadingOverlay
-from src.services.profiles import ProfileRegistry, PROFILE_TYPES
+from src.ui.widgets import make_entry, Modal, LoadingOverlay
+from src.services.profiles import ProfileRegistry
 
 ctk.set_appearance_mode(theme.ctk_mode)
 ctk.set_default_color_theme("blue")
@@ -38,11 +39,19 @@ class ProfileLauncher(ctk.CTk):
 
         hdr = ctk.CTkFrame(self, fg_color=theme.BG_DARK, corner_radius=0)
         hdr.pack(fill="x", padx=32, pady=(28, 8))
-        ctk.CTkLabel(hdr, text="💠 WealthMap", font=("Segoe UI", 28, "bold"),
+        top_row = ctk.CTkFrame(hdr, fg_color="transparent")
+        top_row.pack(fill="x")
+        title_col = ctk.CTkFrame(top_row, fg_color="transparent")
+        title_col.pack(side="left")
+        ctk.CTkLabel(title_col, text="💠 WealthMap", font=("Segoe UI", 28, "bold"),
                      text_color=theme.ACCENT).pack(anchor="w")
-        ctk.CTkLabel(hdr, text="Choose a profile to open, or create a new one. "
+        ctk.CTkLabel(title_col, text="Choose a profile to open, or create a new one. "
                               "Profiles of the same type can be linked for cross-profile transfers.",
                      font=("Segoe UI", 13), text_color=theme.TEXT_SEC).pack(anchor="w", pady=(2, 0))
+        ctk.CTkButton(top_row, text="📥 Restore from Google Drive", height=36,
+                      font=("Segoe UI", 12), fg_color="transparent",
+                      border_color=theme.BORDER, border_width=1, text_color=theme.ACCENT,
+                      command=self._open_restore_dialog).pack(side="right", pady=(8, 0))
 
         body = ctk.CTkFrame(self, fg_color=theme.BG_DARK, corner_radius=0)
         body.pack(fill="both", expand=True, padx=32, pady=(8, 24))
@@ -244,6 +253,159 @@ class ProfileLauncher(ctk.CTk):
                                "This cannot be undone.", icon="warning", parent=self):
             self.registry.delete_profile(profile["id"])
             self._build()
+
+    # ── Restore from Google Drive (setting up WealthMap on a new PC) ───────
+
+    def _open_restore_dialog(self):
+        from src.services.backup_service import GoogleDriveBackupService, WrongPassword, BackupError
+
+        if not hasattr(self, "_restore_backup"):
+            self._restore_backup = GoogleDriveBackupService(self.registry)
+        backup = self._restore_backup
+
+        modal = Modal(self, "Restore from Google Drive", width=520, height=460)
+
+        def render():
+            for w in modal.body.winfo_children():
+                w.destroy()
+
+            if not backup.is_connected():
+                ctk.CTkLabel(modal.body,
+                             text="Sign in to the Google account this was backed up from. "
+                                  "You'll need the same client_secret.json used when backups "
+                                  "were first set up.",
+                             font=("Segoe UI", 12), text_color=theme.TEXT_SEC,
+                             wraplength=440, justify="left").pack(anchor="w", pady=(0, 12))
+
+                def connect():
+                    from tkinter import filedialog
+                    path = filedialog.askopenfilename(
+                        title="Select your Google OAuth client_secret.json",
+                        filetypes=[("JSON", "*.json"), ("All files", "*.*")]
+                    )
+                    if not path:
+                        return
+                    status_lbl.configure(text="Opening browser to sign in…")
+
+                    def run():
+                        try:
+                            backup.connect(path)
+                            modal.after(0, render)
+                        except Exception as e:
+                            msg = f"Sign-in failed: {e}"
+                            modal.after(0, lambda: status_lbl.configure(text=msg))
+
+                    import threading
+                    threading.Thread(target=run, daemon=True).start()
+
+                ctk.CTkButton(modal.body, text="Sign in to Google", height=36,
+                              fg_color=theme.ACCENT, hover_color="#1C6FBF", text_color="#fff",
+                              font=("Segoe UI", 12), command=connect).pack(anchor="w")
+                status_lbl = ctk.CTkLabel(modal.body, text="", font=("Segoe UI", 11),
+                                          text_color=theme.TEXT_SEC, wraplength=440, justify="left")
+                status_lbl.pack(anchor="w", pady=(8, 0))
+                return
+
+            ctk.CTkLabel(modal.body, text="Available backups", font=("Segoe UI", 13, "bold"),
+                         text_color=theme.TEXT_PRI).pack(anchor="w", pady=(0, 8))
+            list_frame = ctk.CTkFrame(modal.body, fg_color="transparent")
+            list_frame.pack(fill="x")
+            loading_lbl = ctk.CTkLabel(list_frame, text="Loading backups…", font=("Segoe UI", 12),
+                                       text_color=theme.TEXT_SEC)
+            loading_lbl.pack(anchor="w")
+
+            def load():
+                try:
+                    backups = backup.list_backups()
+                except Exception as e:
+                    msg = f"Couldn't list backups: {e}"
+                    modal.after(0, lambda: loading_lbl.configure(text=msg))
+                    return
+                modal.after(0, lambda: show_backups(backups))
+
+            def show_backups(backups):
+                loading_lbl.destroy()
+                if not backups:
+                    ctk.CTkLabel(list_frame, text="No backups found in this Google account yet.",
+                                 font=("Segoe UI", 12), text_color=theme.TEXT_SEC).pack(anchor="w")
+                    return
+                for b in backups:
+                    row = ctk.CTkFrame(list_frame, fg_color=theme.BG_HOVER, corner_radius=6)
+                    row.pack(fill="x", pady=2)
+                    size_kb = int(b.get("size", 0) or 0) // 1024
+                    ctk.CTkLabel(row, text=f"{b['name']}  ({size_kb} KB)", font=("Segoe UI", 12),
+                                 text_color=theme.TEXT_PRI, anchor="w").pack(side="left", padx=8, pady=6)
+                    ctk.CTkButton(row, text="Restore", width=80, height=28,
+                                  fg_color=theme.ACCENT, hover_color="#1C6FBF", text_color="#fff",
+                                  font=("Segoe UI", 11),
+                                  command=lambda bb=b: pick(bb)).pack(side="right", padx=6, pady=2)
+
+            import threading
+            threading.Thread(target=load, daemon=True).start()
+
+        def pick(chosen_backup):
+            for w in modal.body.winfo_children():
+                w.destroy()
+            ctk.CTkLabel(modal.body, text=f"Restoring: {chosen_backup['name']}",
+                         font=("Segoe UI", 13, "bold"), text_color=theme.TEXT_PRI
+                         ).pack(anchor="w", pady=(0, 8))
+            ctk.CTkLabel(modal.body, text="Enter the backup password. This will overwrite any "
+                                           "profiles already on this computer with the ones in "
+                                           "the backup — a copy of what's here now is kept "
+                                           "alongside it just in case.",
+                         font=("Segoe UI", 11), text_color=theme.TEXT_SEC,
+                         wraplength=440, justify="left").pack(anchor="w", pady=(0, 12))
+            pw = make_entry(modal.body, placeholder="Backup password", show="•")
+            pw.pack(fill="x")
+            status_lbl = ctk.CTkLabel(modal.body, text="", font=("Segoe UI", 11),
+                                      text_color=theme.TEXT_SEC, wraplength=440, justify="left")
+            status_lbl.pack(anchor="w", pady=(8, 0))
+
+            def do_restore():
+                password = pw.get()
+                if not password:
+                    return
+                status_lbl.configure(text="Downloading…", text_color=theme.TEXT_SEC)
+
+                def run():
+                    import tempfile as _tempfile
+                    tmp = Path(_tempfile.mkdtemp()) / "restore.wmb"
+                    try:
+                        backup.download_backup(chosen_backup["id"], tmp)
+                        modal.after(0, lambda: status_lbl.configure(text="Decrypting & restoring…"))
+                        backup.restore_from_file(tmp, password)
+                        modal.after(0, on_success)
+                    except WrongPassword:
+                        modal.after(0, lambda: status_lbl.configure(
+                            text="Incorrect password.", text_color=theme.RED))
+                    except BackupError as e:
+                        msg = str(e)
+                        modal.after(0, lambda: status_lbl.configure(
+                            text=msg, text_color=theme.RED))
+                    except Exception as e:
+                        msg = f"Restore failed: {e}"
+                        modal.after(0, lambda: status_lbl.configure(
+                            text=msg, text_color=theme.RED))
+                    finally:
+                        try:
+                            tmp.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+
+                import threading
+                threading.Thread(target=run, daemon=True).start()
+
+            def on_success():
+                modal.destroy()
+                messagebox.showinfo("Restore Complete",
+                                    "Your data has been restored. Reopening the profile list…",
+                                    parent=self)
+                self.registry.reload()
+                self._build()
+
+            modal.add_buttons("Restore", do_restore, cancel_text="Cancel")
+
+        render()
 
 
 # ── Reusable helpers (also used by the in-app profile switcher) ────────────
