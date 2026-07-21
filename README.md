@@ -428,6 +428,26 @@ beforehand either way.
 
 ---
 
+## 📄 Import Payslip
+
+Transactions → **Import Payslip** (also in Settings → Data Management) reads
+a WTW-style computer-generated payslip PDF and shows a fully editable
+preview before anything is saved: which account to deposit into, the date,
+description, gross pay, and every deduction line (each becomes an itemized
+fee/tax line on the salary transaction). Deductions that are actually loan
+or insurance repayments (e.g. Company Emergency Loan, Critical Illness) can
+be linked to an existing Loans-tab entry or used to create a new one, with
+the outstanding balance kept in sync with what the payslip states. Nothing
+is written to the database until you click **Import**.
+
+Every individual figure — each taxable and non-taxable earning, each
+deduction, each loan balance, and each Year-To-Date summary line — is saved
+as its own record, not just rolled into the salary transaction's total.
+Open **Settings → Payslip History** (or **🧾 View Full Payslip** on the
+created transaction) to see the complete original breakdown at any time.
+
+---
+
 ## 🔮 Roadmap (Future Versions)
 
 - **v4**: Optional encrypted DB, password lock

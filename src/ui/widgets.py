@@ -6,7 +6,7 @@ panel after a theme switch automatically re-applies the new palette.
 
 import tkinter as tk
 import customtkinter as ctk
-from typing import Callable, Optional, List
+from typing import Callable, Optional, List, Tuple
 
 from src.ui.theme import theme
 
@@ -429,7 +429,12 @@ class CurrencySearchEntry(ctk.CTkEntry):
 
 class SectionHeader(ctk.CTkFrame):
     def __init__(self, parent, title: str, subtitle: str = "",
-                 btn_text: Optional[str] = None, btn_cmd: Optional[Callable] = None, **kw):
+                 btn_text: Optional[str] = None, btn_cmd: Optional[Callable] = None,
+                 extra_buttons: Optional[List[Tuple[str, Callable]]] = None, **kw):
+        """`extra_buttons`: optional list of (text, command) pairs rendered as
+        secondary (outlined) buttons to the left of the primary btn_text
+        button — for a section that has more than one header-level action
+        (e.g. "New Transaction" + "Import Payslip")."""
         super().__init__(parent, fg_color="transparent", **kw)
         self.grid_columnconfigure(0, weight=1)
 
@@ -441,12 +446,22 @@ class SectionHeader(ctk.CTkFrame):
             ctk.CTkLabel(left, text=subtitle,
                          font=("Segoe UI", 12), text_color=theme.TEXT_SEC).pack(anchor="w")
 
+        right = ctk.CTkFrame(self, fg_color="transparent")
+        right.grid(row=0, column=1, sticky="e")
+
+        for txt, cmd in (extra_buttons or []):
+            ctk.CTkButton(right, text=txt, command=cmd,
+                          fg_color="transparent", border_color=theme.BORDER, border_width=1,
+                          text_color=theme.TEXT_PRI, hover_color=theme.BG_HOVER,
+                          font=("Segoe UI", 13), height=34, corner_radius=8,
+                          ).pack(side="left", padx=(0, 8))
+
         if btn_text and btn_cmd:
-            ctk.CTkButton(self, text=btn_text, command=btn_cmd,
+            ctk.CTkButton(right, text=btn_text, command=btn_cmd,
                           fg_color=theme.ACCENT, hover_color=theme.BG_SELECTED,
                           text_color="#fff", font=("Segoe UI", 13),
                           height=34, corner_radius=8,
-                          ).grid(row=0, column=1, sticky="e")
+                          ).pack(side="left")
 
 
 # ── Stat Card ─────────────────────────────────────────────────────────────────

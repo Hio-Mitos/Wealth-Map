@@ -17,6 +17,7 @@ from src.ui.widgets import (
 )
 from src.ui.theme import theme
 from src.services.backup_service import GoogleDriveBackupService
+from src.ui.payslip_dialog import open_payslip_import_dialog, open_payslip_history
 
 
 class SettingsPanel(ctk.CTkFrame):
@@ -171,6 +172,16 @@ class SettingsPanel(ctk.CTkFrame):
                       fg_color="transparent", border_color=theme.BORDER, border_width=1,
                       text_color=theme.GREEN, font=("Segoe UI", 12),
                       command=self._backup_db).pack(side="left", padx=(0, 12))
+
+        ctk.CTkButton(btn_row, text="📄 Import Payslip", width=150, height=36,
+                      fg_color="transparent", border_color=theme.BORDER, border_width=1,
+                      text_color=theme.ACCENT, font=("Segoe UI", 12),
+                      command=self._import_payslip).pack(side="left", padx=(0, 12))
+
+        ctk.CTkButton(btn_row, text="📜 Payslip History", width=150, height=36,
+                      fg_color="transparent", border_color=theme.BORDER, border_width=1,
+                      text_color=theme.GOLD, font=("Segoe UI", 12),
+                      command=lambda: open_payslip_history(self, self.ctx)).pack(side="left", padx=(0, 12))
 
         ctk.CTkButton(btn_row, text="🗑 Reset All Data", width=140, height=36,
                       fg_color="transparent", border_color=theme.RED, border_width=1,
@@ -567,6 +578,9 @@ class SettingsPanel(ctk.CTkFrame):
         except Exception as e:
             messagebox.showerror("Reset Error", str(e))
 
+    def _import_payslip(self):
+        open_payslip_import_dialog(self, self.ctx, on_done=self.app.refresh)
+
     def _revert_session_changes(self):
         if not getattr(self.ctx, "has_session_changes", False):
             return
@@ -753,7 +767,11 @@ class SettingsPanel(ctk.CTkFrame):
         if last_at:
             try:
                 dt = datetime.fromisoformat(last_at)
-                last_text = f"Last backup: {dt.strftime('%d %b %Y, %H:%M')} UTC"
+                # Stored in UTC — show in the user's local time (with
+                # seconds) so "the exact time the last backup was done" is
+                # unambiguous at a glance, not something to mentally convert.
+                local_dt = dt.astimezone()
+                last_text = f"Last backup: {local_dt.strftime('%d %b %Y, %H:%M:%S')}"
             except Exception:
                 last_text = f"Last backup: {last_at}"
         else:

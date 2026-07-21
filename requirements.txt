@@ -11,6 +11,7 @@ cryptography>=41.0.0
 reportlab>=4.0.0
 tkcalendar>=1.6.1
 yfinance>=0.2.40
+pdfplumber>=0.11.0   # Import Payslip (Transactions -> Import Payslip)
 
 # Google Drive backup (Settings -> Backup & Sync)
 google-api-python-client>=2.100.0

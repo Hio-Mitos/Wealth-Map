@@ -24,7 +24,8 @@ from src.models.database import (
     Opportunity, OpportunityCategory, OpportunityDirection, OpportunityStatus,
     TransactionCharge, AssetPriceSnapshot,
     CREDIT_TRANSACTION_TYPES, DEBIT_TRANSACTION_TYPES,
-    CustomCategory, CustomTransactionType
+    CustomCategory, CustomTransactionType,
+    Payslip, PayslipLineItem
 )
 
 # ─── Constants ────────────────────────────────────────────────────────────────
@@ -1374,6 +1375,71 @@ class DepartmentService:
         return result
 
 
+# ─── Payslip Service ──────────────────────────────────────────────────────────
+
+class PayslipService:
+    """
+    Persists a fully-parsed payslip (see src/services/payslip_import.py) as
+    a Payslip header row plus one PayslipLineItem per taxable earning,
+    non-taxable earning, deduction, loan balance, and Year-To-Date summary
+    figure — the complete document, not just the net-pay Transaction it
+    produced. This is a plain archive: it doesn't affect account balances
+    (the linked Transaction + its TransactionCharges already do that) — it
+    exists so every individual figure on the payslip stays queryable/visible
+    in the app after the fact.
+    """
+    def __init__(self, session: Session):
+        self.db = session
+
+    def get_all(self) -> List[Payslip]:
+        return self.db.query(Payslip).order_by(Payslip.period_end.desc().nullslast()).all()
+
+    def get_for_transaction(self, transaction_id: int) -> Optional[Payslip]:
+        return self.db.query(Payslip).filter_by(transaction_id=transaction_id).first()
+
+    def create_from_parsed(self, parsed: Dict, account: Optional[Account] = None,
+                           transaction: Optional[Transaction] = None) -> Payslip:
+        emp = parsed.get("employee", {})
+        payslip = Payslip(
+            account_id=account.id if account else None,
+            transaction_id=transaction.id if transaction else None,
+            employee_code=emp.get("code", ""),
+            employee_name=emp.get("name", ""),
+            company=parsed.get("company", ""),
+            currency_code=parsed.get("currency", ""),
+            period_start=parsed.get("period_start"),
+            period_end=parsed.get("period_end"),
+            gross_pay=parsed.get("gross_pay", 0.0),
+            total_deductions=parsed.get("totals", {}).get("deductions", 0.0),
+            net_pay=parsed.get("net_pay", 0.0),
+            source_filename=Path(parsed["source_file"]).name if parsed.get("source_file") else "",
+        )
+        self.db.add(payslip)
+
+        def add_items(section: str, rows, label_key="label", amount_key="amount", hours_key=None):
+            for row in rows:
+                self.db.add(PayslipLineItem(
+                    payslip=payslip, section=section,
+                    label=row.get(label_key, ""),
+                    hours=row.get(hours_key) if hours_key else None,
+                    amount=row.get(amount_key, 0.0),
+                ))
+
+        add_items("taxable_earning", parsed.get("taxable_earnings", []), hours_key="hours")
+        add_items("non_taxable_earning", parsed.get("non_taxable_earnings", []))
+        add_items("deduction", parsed.get("deductions", []))
+        add_items("loan_balance", parsed.get("loan_balances", []))
+        add_items("ytd_summary", parsed.get("ytd_summary", []))
+
+        self.db.commit()
+        self.db.refresh(payslip)
+        return payslip
+
+    def delete(self, payslip: Payslip):
+        self.db.delete(payslip)
+        self.db.commit()
+
+
 # ─── Attachment Service ───────────────────────────────────────────────────────
 
 class AttachmentService:
@@ -1499,6 +1565,7 @@ class AppContext:
         self.attachment = AttachmentService(att_dir)
         self.customization = CustomizationService(self.session)
         self.department = DepartmentService(self.session)
+        self.payslip    = PayslipService(self.session)
 
         from src.services.market_data import MarketDataService
         self.market_data = MarketDataService()

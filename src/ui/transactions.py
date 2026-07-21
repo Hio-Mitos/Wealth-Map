@@ -17,6 +17,7 @@ from src.ui.widgets import (
     color_for_amount, attach_currency_tooltip, AttachmentSection
 )
 from src.ui.theme import theme
+from src.ui.payslip_dialog import open_payslip_import_dialog, show_payslip_viewer
 
 
 class TransactionsPanel(ctk.CTkFrame):
@@ -43,7 +44,8 @@ class TransactionsPanel(ctk.CTkFrame):
         if self._filter_account != "All Accounts":
             subtitle = f"Filtered to: {self._filter_account}"
         SectionHeader(hdr, "Transactions", subtitle,
-                      "＋ New Transaction", lambda: self._open_tx_modal()).pack(fill="x")
+                      "＋ New Transaction", lambda: self._open_tx_modal(),
+                      extra_buttons=[("📄 Import Payslip", self._import_payslip)]).pack(fill="x")
 
         # Filter bar
         filter_bar = ctk.CTkFrame(self, fg_color=theme.BG_CARD, corner_radius=10,
@@ -287,6 +289,13 @@ class TransactionsPanel(ctk.CTkFrame):
                       text_color=theme.RED, font=("Segoe UI", 11),
                       command=lambda: self._delete_tx(tx)).pack(side="left", padx=6)
 
+        payslip = self.ctx.payslip.get_for_transaction(tx.id)
+        if payslip:
+            ctk.CTkButton(action_row, text="🧾 View Full Payslip", width=160, height=28,
+                          fg_color="transparent", border_color=theme.BORDER, border_width=1,
+                          text_color=theme.GOLD, font=("Segoe UI", 11),
+                          command=lambda: show_payslip_viewer(self, payslip)).pack(side="left", padx=6)
+
         # Attachments section
         att_frame = ctk.CTkFrame(self._detail_frame, fg_color="transparent")
         att_frame.pack(fill="x", padx=16, pady=(0, 4))
@@ -352,6 +361,12 @@ class TransactionsPanel(ctk.CTkFrame):
                          text_color=theme.TEXT_SEC, font=("Segoe UI", 12)).pack(pady=12)
 
     # ── New / Edit transaction modal ────────────────────────────────────────
+
+    def _import_payslip(self):
+        def _after():
+            self.app.refresh()
+            self._load_transactions()
+        open_payslip_import_dialog(self, self.ctx, on_done=_after)
 
     def _open_tx_modal(self, tx=None):
         is_edit = tx is not None

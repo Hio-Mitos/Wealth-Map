@@ -492,6 +492,61 @@ class Receipt(Base):
                                cascade="all, delete-orphan")
 
 
+class Payslip(Base):
+    """
+    A full structured archive of one imported payslip — every taxable and
+    non-taxable earning, every deduction, every loan balance, and every
+    Year-To-Date summary figure exactly as it appeared on the document, not
+    just the single net-pay Transaction it produced. Lets the user look
+    back at a specific payslip's full breakdown later, independent of the
+    original PDF.
+    """
+    __tablename__ = "payslips"
+
+    id                = Column(Integer, primary_key=True)
+    account_id        = Column(Integer, ForeignKey("accounts.id"), nullable=True)
+    transaction_id    = Column(Integer, ForeignKey("transactions.id"), nullable=True)
+    employee_code     = Column(String(50), default="")
+    employee_name     = Column(String(200), default="")
+    company           = Column(String(200), default="")
+    currency_code     = Column(String(10), default="")
+    period_start      = Column(DateTime, nullable=True)
+    period_end        = Column(DateTime, nullable=True)
+    gross_pay         = Column(Float, default=0.0)
+    total_deductions  = Column(Float, default=0.0)
+    net_pay           = Column(Float, default=0.0)
+    source_filename   = Column(String(300), default="")
+    created_at        = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    account     = relationship("Account")
+    transaction = relationship("Transaction")
+    line_items  = relationship("PayslipLineItem", back_populates="payslip",
+                               cascade="all, delete-orphan",
+                               order_by="PayslipLineItem.id")
+
+    def items_in(self, section: str):
+        return [li for li in self.line_items if li.section == section]
+
+
+class PayslipLineItem(Base):
+    """One row from one section of a Payslip: a taxable/non-taxable earning,
+    a deduction, a loan balance, or a Year-To-Date summary figure."""
+    __tablename__ = "payslip_line_items"
+
+    SECTIONS = ("taxable_earning", "non_taxable_earning", "deduction",
+                "loan_balance", "ytd_summary")
+
+    id         = Column(Integer, primary_key=True)
+    payslip_id = Column(Integer, ForeignKey("payslips.id"), nullable=False)
+    section    = Column(String(30), nullable=False)   # one of SECTIONS
+    label      = Column(String(200), default="")
+    hours      = Column(Float, nullable=True)
+    amount     = Column(Float, default=0.0)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    payslip = relationship("Payslip", back_populates="line_items")
+
+
 class Opportunity(Base):
     """
     Tracks 'attempts' to gain (or take on) money: credit card applications,

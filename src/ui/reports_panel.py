@@ -8,6 +8,7 @@ import threading
 import subprocess
 import sys
 from datetime import datetime, timezone
+from dateutil.relativedelta import relativedelta
 from pathlib import Path
 from tkinter import filedialog, messagebox
 import tkinter as tk
@@ -188,6 +189,12 @@ class ReportsPanel(ctk.CTkFrame):
                 return
             extra_kwargs["account_id"] = acc_id
 
+        elif key == "fees_taxes":
+            period = self._ask_date_range()
+            if period is None:
+                return
+            extra_kwargs["start_date"], extra_kwargs["end_date"] = period
+
         # Ask save location
         ft = [("PDF files", "*.pdf")] if not is_xl else [("Excel files", "*.xlsx")]
         path = filedialog.asksaveasfilename(
@@ -215,7 +222,7 @@ class ReportsPanel(ctk.CTkFrame):
                     "loans":       lambda p: LoansReport().generate(self.ctx, p),
                     "receipts":    lambda p: ReceiptsReport().generate(self.ctx, p),
                     "exchange":    lambda p: ExchangeRatesReport().generate(self.ctx, p),
-                    "fees_taxes":  lambda p: FeesTaxesReport().generate(self.ctx, p),
+                    "fees_taxes":  lambda p: FeesTaxesReport().generate(self.ctx, p, **extra_kwargs),
                     "xlsx_export": lambda p: XLSXExporter().generate(self.ctx, p),
                 }
                 self.after(0, lambda: self._progress.set(0.5))
@@ -338,6 +345,80 @@ class ReportsPanel(ctk.CTkFrame):
                       command=ok).pack(pady=10)
         dialog.wait_window()
         return result["year"], result["month"]
+
+    def _ask_date_range(self):
+        """Presets (All Time / This Year / This Month / Last 12 Months /
+        Custom) for reports that can be scoped to a period — used by
+        Fees & Taxes so 'how much tax did I pay this year' is a real
+        question the report can answer, not just an all-time total."""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Select Period")
+        dialog.geometry("360x260")
+        dialog.configure(fg_color=theme.BG_DARK)
+        dialog.grab_set()
+        dialog.lift()
+
+        now = datetime.now()
+        presets = ["All Time", "This Year", "This Month", "Last 12 Months", "Custom Range…"]
+        result = {"start": None, "end": None, "cancelled": True}
+
+        ctk.CTkLabel(dialog, text="Period:", text_color=theme.TEXT_PRI,
+                     font=("Segoe UI", 12)).pack(pady=(20, 6))
+        preset_c = ctk.CTkComboBox(dialog, values=presets, width=280,
+                                   fg_color=theme.BG_CARD, border_color=theme.BORDER,
+                                   text_color=theme.TEXT_PRI, font=("Segoe UI", 12), height=36)
+        preset_c.set("All Time")
+        preset_c.pack(pady=6)
+
+        custom_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+
+        from_e = ctk.CTkEntry(custom_frame, placeholder_text="From (YYYY-MM-DD)",
+                              fg_color=theme.BG_CARD, border_color=theme.BORDER,
+                              text_color=theme.TEXT_PRI, font=("Segoe UI", 12), height=34, width=260)
+        from_e.pack(pady=4)
+        to_e = ctk.CTkEntry(custom_frame, placeholder_text="To (YYYY-MM-DD)",
+                            fg_color=theme.BG_CARD, border_color=theme.BORDER,
+                            text_color=theme.TEXT_PRI, font=("Segoe UI", 12), height=34, width=260)
+        to_e.pack(pady=4)
+
+        def on_preset_change(choice=None):
+            if preset_c.get() == "Custom Range…":
+                custom_frame.pack(pady=(4, 0))
+            else:
+                custom_frame.pack_forget()
+
+        preset_c.configure(command=on_preset_change)
+
+        def ok():
+            choice = preset_c.get()
+            if choice == "All Time":
+                result["start"], result["end"] = None, None
+            elif choice == "This Year":
+                result["start"] = datetime(now.year, 1, 1)
+                result["end"] = now
+            elif choice == "This Month":
+                result["start"] = datetime(now.year, now.month, 1)
+                result["end"] = now
+            elif choice == "Last 12 Months":
+                result["start"] = now - relativedelta(months=12)
+                result["end"] = now
+            else:  # Custom Range
+                try:
+                    result["start"] = datetime.strptime(from_e.get().strip(), "%Y-%m-%d") if from_e.get().strip() else None
+                    result["end"] = datetime.strptime(to_e.get().strip(), "%Y-%m-%d") if to_e.get().strip() else None
+                except ValueError:
+                    messagebox.showerror("Invalid Date", "Use the format YYYY-MM-DD.", parent=dialog)
+                    return
+            result["cancelled"] = False
+            dialog.destroy()
+
+        ctk.CTkButton(dialog, text="Generate", fg_color=theme.ACCENT, hover_color="#1C6FBF",
+                      text_color="#fff", font=("Segoe UI", 12), height=34,
+                      command=ok).pack(pady=(16, 8))
+        dialog.wait_window()
+        if result["cancelled"]:
+            return None
+        return result["start"], result["end"]
 
     def _ask_account(self):
         accounts = self.ctx.account.get_all()

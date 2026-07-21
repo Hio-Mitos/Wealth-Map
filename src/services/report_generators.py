@@ -1042,16 +1042,40 @@ class FeesTaxesReport:
     exactly how much "extra" they're paying on top of their main expenses.
     """
 
-    def generate(self, ctx, output_path: str) -> str:
+    def generate(self, ctx, output_path: str,
+                 start_date=None, end_date=None) -> str:
+        """`start_date`/`end_date` (optional datetimes, inclusive) scope the
+        report to a period — e.g. "all taxes paid in 2026" — instead of
+        every fee/tax ever recorded. Transactions and portfolio trades are
+        filtered by their own date; loan repayment fees by when they were
+        repaid; a loan's one-time origination fee by when the loan itself
+        was created."""
         base = ctx.settings.get("base_currency", "USD")
         bsym = _sym(ctx, base)
 
+        period_note = ""
+        if start_date or end_date:
+            s = start_date.strftime("%d %b %Y") if start_date else "the beginning"
+            e = end_date.strftime("%d %b %Y") if end_date else "today"
+            period_note = f" ({s} – {e})"
+
         rb = ReportBuilder("Fees & Taxes Report",
-                           "Every additional charge across transactions, loans & trades",
+                           f"Every additional charge across transactions, loans & trades{period_note}",
                            ctx, output_path)
+
+        def in_range(dt) -> bool:
+            if dt is None:
+                return start_date is None and end_date is None
+            if start_date and dt < start_date:
+                return False
+            if end_date and dt > end_date:
+                return False
+            return True
 
         # ── Gather data ──────────────────────────────────────────────────
         txs = ctx.session.query(Transaction).all()
+        if start_date or end_date:
+            txs = [tx for tx in txs if in_range(tx.transaction_date)]
 
         tx_fee_total = tx_tax_total = 0.0
         tx_rows = []
@@ -1097,7 +1121,8 @@ class FeesTaxesReport:
                     charge.description or "—",
                 ])
 
-        # Loan fees
+        # Loan fees. The one-time origination fee is dated by the loan's
+        # created_at; each repayment fee by its own repaid_on.
         loans = ctx.loan.get_all(include_settled=True)
         loan_fee_total = 0.0
         loan_rows = []
@@ -1106,20 +1131,22 @@ class FeesTaxesReport:
             fee = loan.fee_amount or 0.0
             cur = loan.currency
             sym = cur.symbol if cur else ""
-            fee_base = (ctx.currency.convert(fee, cur.code, base) or fee) if fee else 0.0
+            fee_in_range = fee and in_range(loan.created_at)
+            fee_base = (ctx.currency.convert(fee, cur.code, base) or fee) if fee_in_range else 0.0
             loan_fee_total += fee_base
-            for rep in loan.repayments:
+            repayments_in_range = [r for r in loan.repayments if in_range(r.repaid_on)]
+            for rep in repayments_in_range:
                 rfee = rep.fee_amount or 0.0
                 rfee_base = (ctx.currency.convert(rfee, cur.code, base) or rfee) if rfee else 0.0
                 repayment_fee_total += rfee_base
-            if fee == 0 and not any((r.fee_amount or 0) for r in loan.repayments):
+            if not fee_in_range and not any((r.fee_amount or 0) for r in repayments_in_range):
                 continue
             loan_rows.append([
                 loan.contact_name,
                 "They owe me" if loan.direction == "owed_to_me" else "I owe",
-                _money_cell(fee, sym) if fee else "—",
+                _money_cell(fee, sym) if fee_in_range else "—",
                 loan.fee_description or "—",
-                _money_cell(sum(r.fee_amount or 0 for r in loan.repayments), sym),
+                _money_cell(sum(r.fee_amount or 0 for r in repayments_in_range), sym),
             ])
 
         # Portfolio trade fees & taxes
@@ -1130,6 +1157,8 @@ class FeesTaxesReport:
             cur = asset.currency
             sym = cur.symbol if cur else ""
             for trade in asset.trades:
+                if not in_range(trade.trade_date):
+                    continue
                 fee = trade.fees or 0.0
                 tax = trade.taxes or 0.0
                 if fee == 0 and tax == 0:
@@ -1148,10 +1177,12 @@ class FeesTaxesReport:
 
         grand_total = tx_fee_total + tx_tax_total + loan_fee_total + repayment_fee_total + \
                        trade_fee_total + trade_tax_total
+        total_taxes_only = tx_tax_total + trade_tax_total
 
         # ── Cover & summary ─────────────────────────────────────────────
         rb.add_cover([
-            f"Total fees & taxes paid (in {base}): {bsym}{grand_total:,.2f}",
+            f"Total fees & taxes paid (in {base}){period_note}: {bsym}{grand_total:,.2f}",
+            f"Of which taxes only: {bsym}{total_taxes_only:,.2f}",
             f"Transaction fees+taxes: {bsym}{(tx_fee_total + tx_tax_total):,.2f}",
             f"Loan-related fees: {bsym}{(loan_fee_total + repayment_fee_total):,.2f}",
             f"Portfolio trade fees+taxes: {bsym}{(trade_fee_total + trade_tax_total):,.2f}",

@@ -347,8 +347,30 @@ class ProfileLauncher(ctk.CTk):
                     row = ctk.CTkFrame(list_frame, fg_color=theme.BG_HOVER, corner_radius=6)
                     row.pack(fill="x", pady=2)
                     size_kb = int(b.get("size", 0) or 0) // 1024
-                    ctk.CTkLabel(row, text=f"{b['name']}  ({size_kb} KB)", font=("Segoe UI", 12),
-                                 text_color=theme.TEXT_PRI, anchor="w").pack(side="left", padx=8, pady=6)
+
+                    # Drive returns createdTime as UTC ISO-8601 (e.g.
+                    # "2026-07-21T14:30:12.123Z") — show the exact day and
+                    # time (converted to local time) so it's clear exactly
+                    # when each backup was saved, before picking one to
+                    # restore.
+                    when_text = ""
+                    created = b.get("createdTime")
+                    if created:
+                        try:
+                            dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                            when_text = dt.astimezone().strftime("%d %b %Y, %H:%M:%S")
+                        except Exception:
+                            when_text = created
+
+                    text_col = ctk.CTkFrame(row, fg_color="transparent")
+                    text_col.pack(side="left", padx=8, pady=6, fill="x", expand=True)
+                    ctk.CTkLabel(text_col, text=when_text or b["name"],
+                                 font=("Segoe UI", 13, "bold"),
+                                 text_color=theme.TEXT_PRI, anchor="w").pack(anchor="w")
+                    ctk.CTkLabel(text_col, text=f"{b['name']}  •  {size_kb} KB",
+                                 font=("Segoe UI", 10),
+                                 text_color=theme.TEXT_SEC, anchor="w").pack(anchor="w")
+
                     ctk.CTkButton(row, text="Restore", width=80, height=28,
                                   fg_color=theme.ACCENT, hover_color="#1C6FBF", text_color="#fff",
                                   font=("Segoe UI", 11),
