@@ -322,34 +322,71 @@ a spreadsheet.
 
 Settings → **Backup & Sync** can back up your *entire* data root (every
 profile — databases and attachments, not just the one you're currently in)
-straight to your own Google Drive, encrypted, so you can pick everything back
-up on a new PC. This talks to Google Drive directly (like WhatsApp backing up
-to Drive on Android) — it does **not** require the Google Drive desktop app.
+straight to Google Drive, encrypted, so you can pick everything back up on a
+new PC. This talks to Google Drive directly (like WhatsApp backing up to
+Drive on Android) — it does **not** require the Google Drive desktop app.
 
-**One-time setup — create your own Google OAuth client** (WealthMap doesn't
-ship a shared one, so this step is required once, by you):
+There are two ways to connect, side by side in Settings → Backup & Sync:
+
+### Quick Connect (what colleagues should use)
+
+One click: **Connect Google Drive** → sign in with your Google account in
+the browser window that opens → done. WealthMap then, automatically and
+without asking anything else:
+- generates a strong random encryption key and stores it in this PC's own
+  secure credential manager (Windows Credential Manager / macOS Keychain /
+  Linux Secret Service), so it's remembered here without ever being typed
+  or written to a plain file,
+- shows that key **once**, as a "recovery key" to save somewhere safe — it's
+  the one thing you'd need to restore on a *different* PC,
+- turns on automatic backup on data changes and on close.
+
+From that point on, nothing more is needed on that PC — open Settings →
+Backup & Sync any time to see a live status line, a progress bar while a
+backup is running, the last backup time, and full error details if one
+ever fails.
+
+Quick Connect needs a one-time setup by whoever administers this WealthMap
+install (see below) — until that's done, the button explains as much and
+people can use "Advanced" in the meantime.
+
+### Advanced: bring your own Google Cloud project
+
+For anyone who'd rather not share the app-wide client (e.g. running their
+own isolated setup): **Sign in with my own client_secret.json**, following
+the same one-time Google Cloud Console steps as the admin setup below, then
+choose your own backup password (re-entered once per app session to unlock
+automatic backups — never stored).
+
+### Admin setup — enabling Quick Connect for everyone (one time)
+
+Quick Connect needs a single, app-wide Google OAuth client bundled with
+WealthMap. Create it once:
 
 1. Go to [console.cloud.google.com](https://console.cloud.google.com/) and
    create a new project (any name).
 2. **APIs & Services → Library** → enable the **Google Drive API**.
 3. **APIs & Services → OAuth consent screen** → choose **External**, fill in
-   an app name/support email, and add yourself as a test user.
+   an app name/support email. (Each person who connects still authorizes
+   only their own Drive — this doesn't share access between users.)
 4. **APIs & Services → Credentials → Create Credentials → OAuth client ID**
    → application type **Desktop app**.
-5. Download the resulting JSON file (it's your `client_secret.json`) and keep
-   it somewhere you can find again — you'll need the *same* file if you ever
-   reconnect on another computer.
+5. Download the resulting JSON file and save it as `gdrive_bundled_client.json`
+   in the WealthMap project root (next to `main.py`). It's already in
+   `.gitignore`, so it won't end up in the repo — distribute it to
+   colleagues however you'd share any other file (it identifies the app,
+   not any one person's account, but treat it like a credential anyway).
 
-**Then in WealthMap**: Settings → Backup & Sync → **Connect Google Drive**
-(pick that JSON file, sign in when your browser opens) → **Set Password**
-(this encrypts every backup; WealthMap never stores it) → tick which
-triggers you want (data changes / once a day / on close — any combination)
-→ **Save**.
+Once that file is in place, **Connect Google Drive** (Quick Connect) becomes
+available to everyone using this install.
 
-**Restoring on a new PC**: on the profile picker screen (before opening any
-profile), click **Restore from Google Drive**, sign in with the same
-`client_secret.json`, pick a backup, and enter your backup password. Nothing
-needs to exist locally beforehand — the password is all that's required.
+### Restoring on a new PC
+
+On the profile picker screen (before opening any profile), click **Restore
+from Google Drive**, sign in (Quick Connect if the bundled client is
+present, or your own `client_secret.json` otherwise), pick a backup, and
+enter your backup password / recovery key. Nothing needs to exist locally
+beforehand — the password is all that's required.
 
 ---
 

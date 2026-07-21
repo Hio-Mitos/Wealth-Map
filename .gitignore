@@ -22,6 +22,11 @@ dist/
 # Environment / secrets
 .env
 
+# Google Drive Quick Connect — shared OAuth client (see README:
+# "Google Drive Backup & Restore"). Kept out of git; distribute this file
+# to colleagues out-of-band (not via the repo) if you set it up.
+gdrive_bundled_client.json
+
 # App runtime data (created on the user's machine, not source)
 WealthMap/
 *.db

@@ -391,12 +391,15 @@ class WealthMapApp(ctk.CTk):
     def _maybe_prompt_backup_unlock(self):
         """If automatic backups are configured (connected + password set +
         at least one trigger on) but not yet unlocked for this run of the
-        app, ask once for the password. Declining just means automatic
-        backups sit out this session — nothing is forced."""
+        app: first try a silent unlock (auto-generated recovery keys live
+        in the OS credential store, so most people — anyone who used
+        Quick Connect — never see a prompt at all). Only if that isn't
+        possible (a manually-chosen password) do we ask once; declining
+        just means automatic backups sit out this session."""
         backup = self.ctx.backup
         if not backup:
             return
-        if backup.is_unlocked:
+        if backup.is_unlocked or backup.try_silent_unlock():
             backup.maybe_daily_backup()
             return
         if not (backup.is_connected() and backup.config.has_password and backup.config.triggers):
@@ -437,6 +440,8 @@ class WealthMapApp(ctk.CTk):
         away. Bounded by a short timeout so a slow/failed upload can
         never prevent the app from closing."""
         backup = self.ctx.backup
+        if backup and "on_close" in backup.config.triggers and not backup.is_unlocked:
+            backup.try_silent_unlock()
         if backup and "on_close" in backup.config.triggers and backup.is_unlocked:
             overlay = None
             try:

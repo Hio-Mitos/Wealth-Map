@@ -9,30 +9,46 @@ can be restored on a new PC.
 Design notes
 ------------
 * True in-app Google Drive integration (OAuth "installed app" flow) — no
-  Google Drive desktop client required. The user provides their own OAuth
-  client credentials (a `client_secret.json` downloaded once from Google
-  Cloud Console); WealthMap never ships or embeds a shared client secret.
+  Google Drive desktop client required. Two ways to connect:
+    - "Quick Connect": uses a shared OAuth client bundled with the app
+      (see BUNDLED_CLIENT_SECRET_PATH) so a colleague never has to touch
+      Google Cloud Console — just sign in with their own Google account.
+      Someone administering WealthMap sets this bundled client up once.
+    - "Advanced": bring your own `client_secret.json` from your own
+      Google Cloud project, for anyone who'd rather not share a client.
+  Either way, each person authorizes access to *their own* Drive — the
+  shared client is just an app identity, not a shared account.
 * Backups are a single encrypted archive: zip the data root, then encrypt
   it with a key derived (PBKDF2-HMAC-SHA256, 390k iterations) from a
-  password the user chooses. The *password itself is never stored* —
-  only a random salt and a small "verifier" (a known string encrypted
-  with the derived key) so a supplied password can be checked before
-  attempting a real restore. Anyone with access to the Drive files alone
-  (Google included) cannot read the backup contents.
-* Because the password is never persisted, fully automatic backups
-  (on-change / daily / on-close) need the derived key to already be in
-  memory. That key is unlocked once per app session (the user is prompted
-  the first time an automatic backup would run) and kept in memory only
-  for the life of the running process — never written to disk.
+  password. The *password itself is never stored* — only a random salt
+  and a small "verifier" (a known string encrypted with the derived key)
+  so a supplied password can be checked before attempting a real restore.
+  Anyone with access to the Drive files alone (Google included) cannot
+  read the backup contents.
+* Two ways to get that password:
+    - Manual: the user picks one and re-enters it once per app session
+      to unlock automatic backups (nothing is ever written to disk).
+    - Auto-generated ("recovery key"): WealthMap generates a strong
+      random one, stores it in the OS's own secure credential store
+      (Windows Credential Manager / macOS Keychain / Linux Secret
+      Service, via the `keyring` package) so this PC never has to ask
+      again, and shows it to the user exactly once so they can save it
+      for restoring on a *different* PC (where there's no OS credential
+      entry to read it back from). This is the WhatsApp/Signal-style
+      "recovery key" pattern, and is what Quick Connect uses by default.
+  Both modes reuse the exact same salt/verifier/encryption machinery —
+  an auto-generated key is treated as just a very strong password that
+  happens to be remembered for you instead of typed by you.
 * Config (which triggers are enabled, the connection state, the password
   salt/verifier, last backup time) lives in `<data_root>/backup_config.json`.
   The OAuth token lives in `<data_root>/gdrive_token.json`. Neither file
-  contains the backup password.
+  contains the backup password/recovery key.
 """
 
 import base64
 import json
 import os
+import secrets
 import shutil
 import tempfile
 import threading
@@ -45,9 +61,9 @@ from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
-# Google API client libraries are imported lazily inside the methods that
-# need them, so the rest of the app (and any environment without these
-# packages installed) doesn't fail just importing this module.
+# Google API client libraries (and `keyring`) are imported lazily inside
+# the methods that need them, so the rest of the app (and any environment
+# without these packages installed) doesn't fail just importing this module.
 
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 BACKUP_FOLDER_NAME = "WealthMap Backups"
@@ -58,6 +74,19 @@ DEBOUNCE_SECONDS = 90
 DAILY_SECONDS = 24 * 60 * 60
 
 ALL_TRIGGERS = ("on_change", "daily", "on_close")
+DEFAULT_QUICK_CONNECT_TRIGGERS = ["on_change", "on_close"]
+
+# The shared, app-wide OAuth client for "Quick Connect". This is *not* a
+# per-user secret — it identifies the WealthMap application to Google, the
+# way any desktop app's client ID does; each person who connects still
+# authorizes only their own Drive. Whoever administers/distributes
+# WealthMap creates this once in Google Cloud Console and places the
+# downloaded JSON at this path (kept out of version control — see
+# .gitignore). If it isn't present, Quick Connect simply isn't offered and
+# people fall back to the "Advanced" bring-your-own-client flow.
+BUNDLED_CLIENT_SECRET_PATH = Path(__file__).resolve().parent.parent.parent / "gdrive_bundled_client.json"
+
+KEYRING_SERVICE = "WealthMap-GoogleDriveBackup"
 
 
 class BackupError(Exception):
@@ -96,6 +125,8 @@ class BackupConfig:
         self.data.setdefault("password_salt", None)    # base64
         self.data.setdefault("password_verifier", None)  # base64 (encrypted known string)
         self.data.setdefault("client_secret_path", None)
+        self.data.setdefault("connect_mode", None)       # "quick" | "advanced"
+        self.data.setdefault("key_mode", None)           # "auto" | "manual"
 
     def save(self):
         self.path.write_text(json.dumps(self.data, indent=2))
@@ -147,6 +178,17 @@ class GoogleDriveBackupService:
 
     # ── Status helper ────────────────────────────────────────────────────
 
+    def set_status_callback(self, on_status: Optional[Callable[[str], None]]):
+        """Lets the currently-open Settings panel (if any) receive live
+        progress text ("Creating backup archive…", "Uploading…", etc.)
+        for the manual progress bar / status line. Safe to call repeatedly
+        (e.g. each time the panel rebuilds) — always replaces, not stacks."""
+        self._on_status = on_status or (lambda msg: None)
+
+    @property
+    def is_running(self) -> bool:
+        return self._running
+
     def _status(self, msg: str):
         try:
             self._on_status(msg)
@@ -155,17 +197,86 @@ class GoogleDriveBackupService:
 
     # ── Password lifecycle ──────────────────────────────────────────────
 
-    def set_password(self, password: str):
+    def set_password(self, password: str, key_mode: str = "manual"):
         """(Re)sets the backup password. Existing backups made with the
         old password are unaffected (still need the old password to
-        restore them) — only backups made from now on use the new one."""
+        restore them) — only backups made from now on use the new one.
+        `key_mode` is just recorded for display ("manual" = user-chosen,
+        re-entered each session; "auto" = generated + kept in the OS
+        credential store, see generate_and_store_key)."""
         salt = os.urandom(16)
         key = _derive_key(password, salt)
         verifier = Fernet(key).encrypt(VERIFIER_PLAINTEXT)
         self.config.data["password_salt"] = base64.b64encode(salt).decode()
         self.config.data["password_verifier"] = base64.b64encode(verifier).decode()
+        self.config.data["key_mode"] = key_mode
         self.config.save()
         self._session_key = key  # unlock this session immediately too
+
+    # ── Auto-generated recovery key (OS credential store) ────────────────
+    # Lets a fully-automatic setup (Quick Connect) work without ever
+    # prompting for a password on the machine that generated it, while
+    # still producing something the person can save and use to restore on
+    # a different machine — the recovery key *is* the password, just
+    # picked and remembered for them instead of typed by them.
+
+    def _keyring_username(self) -> str:
+        # Scoped to this data root so multiple WealthMap data directories
+        # on one machine (unusual, but possible via WEALTHMAP_DATA) don't
+        # collide in the OS credential store.
+        return str(self.root)
+
+    def generate_and_store_key(self) -> str:
+        """Generates a strong random recovery key, sets it as the backup
+        password (auto mode), and saves it in the OS's secure credential
+        store so this machine can retrieve it silently from now on.
+        Returns the generated key — the ONLY time it's available in full;
+        show it to the user immediately so they can save it themselves
+        for restoring on a different PC."""
+        try:
+            import keyring
+        except ImportError as e:
+            raise BackupError(
+                "Secure credential storage isn't installed. Run:\n"
+                "  pip install keyring"
+            ) from e
+
+        recovery_key = secrets.token_urlsafe(24)  # ~32 chars, high entropy
+        self.set_password(recovery_key, key_mode="auto")
+        try:
+            keyring.set_password(KEYRING_SERVICE, self._keyring_username(), recovery_key)
+        except Exception as e:
+            raise BackupError(f"Couldn't save the recovery key securely on this PC: {e}") from e
+        return recovery_key
+
+    def try_silent_unlock(self) -> bool:
+        """If this machine has an auto-generated key saved in its OS
+        credential store, retrieves and verifies it with no user
+        interaction. Returns True if that unlocked the session."""
+        if self.is_unlocked:
+            return True
+        if self.config.get("key_mode") != "auto" or not self.config.has_password:
+            return False
+        try:
+            import keyring
+            stored = keyring.get_password(KEYRING_SERVICE, self._keyring_username())
+        except Exception:
+            return False
+        if not stored:
+            return False
+        try:
+            return self.verify_and_unlock(stored)
+        except BackupError:
+            return False
+
+    def _forget_stored_key(self):
+        if self.config.get("key_mode") != "auto":
+            return
+        try:
+            import keyring
+            keyring.delete_password(KEYRING_SERVICE, self._keyring_username())
+        except Exception:
+            pass
 
     def verify_and_unlock(self, password: str) -> bool:
         """Checks `password` against the stored verifier; if correct,
@@ -195,10 +306,17 @@ class GoogleDriveBackupService:
     def is_connected(self) -> bool:
         return self.token_path.exists()
 
-    def connect(self, client_secret_path: str):
+    @staticmethod
+    def is_bundled_client_available() -> bool:
+        """Whether whoever administers this WealthMap install has placed
+        the shared OAuth client needed for one-click Quick Connect."""
+        return BUNDLED_CLIENT_SECRET_PATH.is_file()
+
+    def connect(self, client_secret_path: str, mode: str = "advanced"):
         """Runs the OAuth 'installed app' consent flow (opens the user's
         browser). Blocking — call from a background thread. Raises
-        BackupError on failure."""
+        BackupError on failure. `mode` is just recorded for display
+        ("quick" = bundled shared client, "advanced" = the user's own)."""
         try:
             from google_auth_oauthlib.flow import InstalledAppFlow
         except ImportError as e:
@@ -218,6 +336,19 @@ class GoogleDriveBackupService:
 
         self.token_path.write_text(creds.to_json())
         self.config.set("client_secret_path", client_secret_path)
+        self.config.set("connect_mode", mode)
+
+    def connect_quick(self):
+        """Sign-in using the bundled, app-wide OAuth client — no file
+        picker, nothing for the user to download. Raises BackupError if
+        no one has set up the bundled client on this install yet."""
+        if not self.is_bundled_client_available():
+            raise BackupError(
+                "Quick Connect isn't set up on this install yet — WealthMap needs a shared "
+                "Google OAuth client bundled with it first. Use \"Advanced\" below in the "
+                "meantime, or ask whoever administers WealthMap to add it."
+            )
+        self.connect(str(BUNDLED_CLIENT_SECRET_PATH), mode="quick")
 
     def disconnect(self):
         if self.token_path.exists():
@@ -226,6 +357,7 @@ class GoogleDriveBackupService:
             except Exception:
                 pass
         self.config.set("folder_id", None)
+        self._forget_stored_key()
 
     def _get_credentials(self):
         from google.auth.transport.requests import Request

@@ -257,7 +257,9 @@ class ProfileLauncher(ctk.CTk):
     # ── Restore from Google Drive (setting up WealthMap on a new PC) ───────
 
     def _open_restore_dialog(self):
-        from src.services.backup_service import GoogleDriveBackupService, WrongPassword, BackupError
+        from src.services.backup_service import (
+            GoogleDriveBackupService, WrongPassword, BackupError, BUNDLED_CLIENT_SECRET_PATH
+        )
 
         if not hasattr(self, "_restore_backup"):
             self._restore_backup = GoogleDriveBackupService(self.registry)
@@ -270,21 +272,10 @@ class ProfileLauncher(ctk.CTk):
                 w.destroy()
 
             if not backup.is_connected():
-                ctk.CTkLabel(modal.body,
-                             text="Sign in to the Google account this was backed up from. "
-                                  "You'll need the same client_secret.json used when backups "
-                                  "were first set up.",
-                             font=("Segoe UI", 12), text_color=theme.TEXT_SEC,
-                             wraplength=440, justify="left").pack(anchor="w", pady=(0, 12))
+                status_lbl = ctk.CTkLabel(modal.body, text="", font=("Segoe UI", 11),
+                                          text_color=theme.TEXT_SEC, wraplength=440, justify="left")
 
-                def connect():
-                    from tkinter import filedialog
-                    path = filedialog.askopenfilename(
-                        title="Select your Google OAuth client_secret.json",
-                        filetypes=[("JSON", "*.json"), ("All files", "*.*")]
-                    )
-                    if not path:
-                        return
+                def connect_with(path):
                     status_lbl.configure(text="Opening browser to sign in…")
 
                     def run():
@@ -298,11 +289,34 @@ class ProfileLauncher(ctk.CTk):
                     import threading
                     threading.Thread(target=run, daemon=True).start()
 
-                ctk.CTkButton(modal.body, text="Sign in to Google", height=36,
-                              fg_color=theme.ACCENT, hover_color="#1C6FBF", text_color="#fff",
-                              font=("Segoe UI", 12), command=connect).pack(anchor="w")
-                status_lbl = ctk.CTkLabel(modal.body, text="", font=("Segoe UI", 11),
-                                          text_color=theme.TEXT_SEC, wraplength=440, justify="left")
+                if GoogleDriveBackupService.is_bundled_client_available():
+                    ctk.CTkLabel(modal.body, text="Sign in with the same Google account this "
+                                                  "was backed up from.",
+                                 font=("Segoe UI", 12), text_color=theme.TEXT_SEC,
+                                 wraplength=440, justify="left").pack(anchor="w", pady=(0, 12))
+                    ctk.CTkButton(modal.body, text="Sign in to Google", height=36,
+                                  fg_color=theme.ACCENT, hover_color="#1C6FBF", text_color="#fff",
+                                  font=("Segoe UI", 12),
+                                  command=lambda: connect_with(str(BUNDLED_CLIENT_SECRET_PATH))
+                                  ).pack(anchor="w", pady=(0, 12))
+                    ctk.CTkLabel(modal.body, text="Backed up from a different install, or using "
+                                                  "your own Google Cloud project instead?",
+                                 font=("Segoe UI", 11), text_color=theme.TEXT_SEC
+                                 ).pack(anchor="w", pady=(0, 4))
+
+                def connect_advanced():
+                    from tkinter import filedialog
+                    path = filedialog.askopenfilename(
+                        title="Select your Google OAuth client_secret.json",
+                        filetypes=[("JSON", "*.json"), ("All files", "*.*")]
+                    )
+                    if path:
+                        connect_with(path)
+
+                ctk.CTkButton(modal.body, text="Sign in with my own client_secret.json", height=32,
+                              fg_color="transparent", border_color=theme.BORDER, border_width=1,
+                              text_color=theme.ACCENT, font=("Segoe UI", 11),
+                              command=connect_advanced).pack(anchor="w")
                 status_lbl.pack(anchor="w", pady=(8, 0))
                 return
 
