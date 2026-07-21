@@ -357,67 +357,111 @@ class ProfileLauncher(ctk.CTk):
             import threading
             threading.Thread(target=load, daemon=True).start()
 
+        def do_download_and_restore(chosen_backup, password, status_lbl, on_error):
+            import tempfile as _tempfile
+            tmp = Path(_tempfile.mkdtemp()) / "restore.wmb"
+            try:
+                backup.download_backup(chosen_backup["id"], tmp)
+                modal.after(0, lambda: status_lbl.configure(text="Decrypting & restoring…"))
+                backup.restore_from_file(tmp, password)
+                modal.after(0, on_success)
+            except WrongPassword:
+                modal.after(0, lambda: on_error("Incorrect password."))
+            except BackupError as e:
+                msg = str(e)
+                modal.after(0, lambda: on_error(msg))
+            except Exception as e:
+                msg = f"Restore failed: {e}"
+                modal.after(0, lambda: on_error(msg))
+            finally:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+        def on_success():
+            modal.destroy()
+            messagebox.showinfo("Restore Complete",
+                                "Your data has been restored. Reopening the profile list…",
+                                parent=self)
+            self.registry.reload()
+            self._build()
+
         def pick(chosen_backup):
             for w in modal.body.winfo_children():
                 w.destroy()
             ctk.CTkLabel(modal.body, text=f"Restoring: {chosen_backup['name']}",
                          font=("Segoe UI", 13, "bold"), text_color=theme.TEXT_PRI
                          ).pack(anchor="w", pady=(0, 8))
-            ctk.CTkLabel(modal.body, text="Enter the backup password. This will overwrite any "
-                                           "profiles already on this computer with the ones in "
-                                           "the backup — a copy of what's here now is kept "
-                                           "alongside it just in case.",
-                         font=("Segoe UI", 11), text_color=theme.TEXT_SEC,
-                         wraplength=440, justify="left").pack(anchor="w", pady=(0, 12))
-            pw = make_entry(modal.body, placeholder="Backup password", show="•")
-            pw.pack(fill="x")
-            status_lbl = ctk.CTkLabel(modal.body, text="", font=("Segoe UI", 11),
-                                      text_color=theme.TEXT_SEC, wraplength=440, justify="left")
-            status_lbl.pack(anchor="w", pady=(8, 0))
+            checking_lbl = ctk.CTkLabel(modal.body, text="Checking for an automatic key on this "
+                                                         "Google account…",
+                                        font=("Segoe UI", 11), text_color=theme.TEXT_SEC,
+                                        wraplength=440, justify="left")
+            checking_lbl.pack(anchor="w", pady=(0, 12))
 
-            def do_restore():
-                password = pw.get()
-                if not password:
-                    return
-                status_lbl.configure(text="Downloading…", text_color=theme.TEXT_SEC)
+            def try_auto():
+                # Backups made with "Automatic — Google account only" can
+                # restore with no password prompt at all: the key lives in
+                # this same Google account's private storage.
+                key = backup.try_google_managed_unlock()
+                modal.after(0, lambda: after_auto_check(key))
 
-                def run():
-                    import tempfile as _tempfile
-                    tmp = Path(_tempfile.mkdtemp()) / "restore.wmb"
-                    try:
-                        backup.download_backup(chosen_backup["id"], tmp)
-                        modal.after(0, lambda: status_lbl.configure(text="Decrypting & restoring…"))
-                        backup.restore_from_file(tmp, password)
-                        modal.after(0, on_success)
-                    except WrongPassword:
-                        modal.after(0, lambda: status_lbl.configure(
-                            text="Incorrect password.", text_color=theme.RED))
-                    except BackupError as e:
-                        msg = str(e)
-                        modal.after(0, lambda: status_lbl.configure(
-                            text=msg, text_color=theme.RED))
-                    except Exception as e:
-                        msg = f"Restore failed: {e}"
-                        modal.after(0, lambda: status_lbl.configure(
-                            text=msg, text_color=theme.RED))
-                    finally:
-                        try:
-                            tmp.unlink(missing_ok=True)
-                        except Exception:
-                            pass
+            def after_auto_check(key):
+                checking_lbl.destroy()
+                if key:
+                    status_lbl = ctk.CTkLabel(modal.body, text="Automatic key found — restoring…",
+                                              font=("Segoe UI", 11), text_color=theme.TEXT_SEC,
+                                              wraplength=440, justify="left")
+                    status_lbl.pack(anchor="w", pady=(0, 8))
 
-                import threading
-                threading.Thread(target=run, daemon=True).start()
+                    def on_error(msg):
+                        # Fall back to manual entry if the automatic key
+                        # somehow didn't work for this particular backup.
+                        status_lbl.destroy()
+                        show_manual_entry()
+                        manual_status.configure(text=msg, text_color=theme.RED)
 
-            def on_success():
-                modal.destroy()
-                messagebox.showinfo("Restore Complete",
-                                    "Your data has been restored. Reopening the profile list…",
-                                    parent=self)
-                self.registry.reload()
-                self._build()
+                    import threading
+                    threading.Thread(
+                        target=do_download_and_restore,
+                        args=(chosen_backup, key, status_lbl, on_error),
+                        daemon=True
+                    ).start()
+                else:
+                    show_manual_entry()
 
-            modal.add_buttons("Restore", do_restore, cancel_text="Cancel")
+            def show_manual_entry():
+                ctk.CTkLabel(modal.body, text="Enter the backup password. This will overwrite "
+                                               "any profiles already on this computer with the "
+                                               "ones in the backup — a copy of what's here now "
+                                               "is kept alongside it just in case.",
+                             font=("Segoe UI", 11), text_color=theme.TEXT_SEC,
+                             wraplength=440, justify="left").pack(anchor="w", pady=(0, 12))
+                pw = make_entry(modal.body, placeholder="Backup password", show="•")
+                pw.pack(fill="x")
+                nonlocal manual_status
+                manual_status = ctk.CTkLabel(modal.body, text="", font=("Segoe UI", 11),
+                                             text_color=theme.TEXT_SEC, wraplength=440, justify="left")
+                manual_status.pack(anchor="w", pady=(8, 0))
+
+                def do_restore():
+                    password = pw.get()
+                    if not password:
+                        return
+                    manual_status.configure(text="Downloading…", text_color=theme.TEXT_SEC)
+                    import threading
+                    threading.Thread(
+                        target=do_download_and_restore,
+                        args=(chosen_backup, password, manual_status,
+                              lambda msg: manual_status.configure(text=msg, text_color=theme.RED)),
+                        daemon=True
+                    ).start()
+
+                modal.add_buttons("Restore", do_restore, cancel_text="Cancel")
+
+            manual_status = None
+            import threading
+            threading.Thread(target=try_auto, daemon=True).start()
 
         render()
 

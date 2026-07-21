@@ -624,8 +624,12 @@ class SettingsPanel(ctk.CTkFrame):
         if not backup.config.has_password:
             pw_status, pw_color = "⚠️ No backup password set yet", theme.GOLD
         elif key_mode == "auto":
-            pw_status = "🔑 Auto-generated recovery key" + (
+            pw_status = "🔑 Recovery key" + (
                 "  •  remembered on this PC" if backup.is_unlocked else "  •  not readable on this PC")
+            pw_color = theme.GREEN if backup.is_unlocked else theme.GOLD
+        elif key_mode == "google_managed":
+            pw_status = "🔑 Automatic (Google account)" + (
+                "  •  remembered on this PC" if backup.is_unlocked else "")
             pw_color = theme.GREEN if backup.is_unlocked else theme.GOLD
         else:
             pw_status = "🔒 Password set" + ("  •  unlocked this session" if backup.is_unlocked else "")
@@ -641,23 +645,34 @@ class SettingsPanel(ctk.CTkFrame):
                                      "you'll need the recovery key shown when you first connected.",
                          font=("Segoe UI", 10), text_color=theme.TEXT_SEC,
                          wraplength=700, justify="left").pack(anchor="w", padx=16, pady=(0, 8))
+        elif key_mode == "google_managed":
+            ctk.CTkLabel(card, text="Restoring on any PC just needs signing into this same Google "
+                                     "account — no key to save. Anyone with access to that account "
+                                     "can also read your backups; see the README if you'd rather "
+                                     "switch to a separate recovery key.",
+                         font=("Segoe UI", 10), text_color=theme.TEXT_SEC,
+                         wraplength=700, justify="left").pack(anchor="w", padx=16, pady=(0, 8))
         else:
             ctk.CTkLabel(card, text="Backups are encrypted with this password before they leave "
                                      "your computer — WealthMap never stores it, so write it down "
                                      "somewhere safe. You'll need it to restore on a new PC.",
                          font=("Segoe UI", 10), text_color=theme.TEXT_SEC,
                          wraplength=700, justify="left").pack(anchor="w", padx=16, pady=(0, 8))
-            ctk.CTkButton(pw_btn_row,
-                          text="Change Password" if backup.config.has_password else "Set Password",
-                          width=160, height=32, fg_color="transparent",
-                          border_color=theme.BORDER, border_width=1,
-                          text_color=theme.ACCENT, font=("Segoe UI", 11),
-                          command=self._gdrive_set_password).pack(side="left", padx=(0, 8))
             if backup.config.has_password and not backup.is_unlocked:
                 ctk.CTkButton(pw_btn_row, text="Unlock This Session", width=160, height=32,
                               fg_color="transparent", border_color=theme.BORDER, border_width=1,
                               text_color=theme.ACCENT, font=("Segoe UI", 11),
-                              command=self._gdrive_unlock).pack(side="left")
+                              command=self._gdrive_unlock).pack(side="left", padx=(0, 8))
+
+        # Always available, in every mode — this is the answer to "can I
+        # change this later": yes, at any time, to any of the three.
+        ctk.CTkButton(pw_btn_row,
+                      text="Change How Backups Are Protected" if backup.config.has_password
+                           else "Set Up Backup Protection",
+                      height=32, fg_color="transparent",
+                      border_color=theme.BORDER, border_width=1,
+                      text_color=theme.ACCENT, font=("Segoe UI", 11),
+                      command=self._gdrive_change_protection).pack(side="left")
 
         ctk.CTkFrame(card, height=1, fg_color=theme.BORDER).pack(fill="x", padx=16, pady=8)
 
@@ -779,16 +794,103 @@ class SettingsPanel(ctk.CTkFrame):
     def _after_quick_connect(self):
         backup = self.ctx.backup
         if not backup.config.has_password:
+            self._gdrive_change_protection(first_time=True)
+        else:
+            self._rebuild_backup_section()
+
+    def _gdrive_change_protection(self, first_time: bool = False):
+        """Lets the person choose (or change, any time later — not just
+        on first connect) how backups get protected: tied to their Google
+        account only, a separate recovery key, or a plain manual password.
+        Switching modes takes effect on the *next* backup onward; it
+        doesn't touch backups already sitting in Drive, which still need
+        whatever protected them at the time."""
+        from src.services.backup_service import DEFAULT_QUICK_CONNECT_TRIGGERS
+        backup = self.ctx.backup
+        title = "How Should Restoring Work?" if first_time else "Change Backup Protection"
+        modal = Modal(self, title, width=480, height=520)
+        if not first_time:
+            ctk.CTkLabel(modal.body, text="This changes how future backups are protected. "
+                                           "Backups already in Drive still need whatever "
+                                           "protected them when they were made.",
+                         font=("Segoe UI", 11), text_color=theme.TEXT_SEC,
+                         wraplength=420, justify="left").pack(anchor="w", pady=(0, 12))
+
+        auto_col = ctk.CTkFrame(modal.body, fg_color=theme.BG_HOVER, corner_radius=8)
+        auto_col.pack(fill="x", pady=(0, 10))
+        ctk.CTkLabel(auto_col, text="Automatic — my Google account only  (recommended)",
+                     font=("Segoe UI", 12, "bold"), text_color=theme.TEXT_PRI
+                     ).pack(anchor="w", padx=12, pady=(10, 2))
+        ctk.CTkLabel(auto_col, text="Restoring on a new PC needs nothing but signing into this "
+                                     "same Google account — no key to save. Trade-off: anyone "
+                                     "who ever gains access to this Google account can also "
+                                     "read your backups.",
+                     font=("Segoe UI", 11), text_color=theme.TEXT_SEC,
+                     wraplength=420, justify="left").pack(anchor="w", padx=12, pady=(0, 10))
+
+        key_col = ctk.CTkFrame(modal.body, fg_color=theme.BG_HOVER, corner_radius=8)
+        key_col.pack(fill="x", pady=(0, 10))
+        ctk.CTkLabel(key_col, text="Recovery key — separate secret",
+                     font=("Segoe UI", 12, "bold"), text_color=theme.TEXT_PRI
+                     ).pack(anchor="w", padx=12, pady=(10, 2))
+        ctk.CTkLabel(key_col, text="WealthMap generates a key and shows it to you once. "
+                                    "Restoring on a new PC needs the Google account AND that "
+                                    "key — a compromised Google account alone can't expose "
+                                    "your data.",
+                     font=("Segoe UI", 11), text_color=theme.TEXT_SEC,
+                     wraplength=420, justify="left").pack(anchor="w", padx=12, pady=(0, 10))
+
+        manual_col = ctk.CTkFrame(modal.body, fg_color=theme.BG_HOVER, corner_radius=8)
+        manual_col.pack(fill="x", pady=(0, 10))
+        ctk.CTkLabel(manual_col, text="Manual password — you choose it",
+                     font=("Segoe UI", 12, "bold"), text_color=theme.TEXT_PRI
+                     ).pack(anchor="w", padx=12, pady=(10, 2))
+        ctk.CTkLabel(manual_col, text="Pick your own password. Nothing is remembered for you — "
+                                       "you'll re-enter it once per session for automatic "
+                                       "backups to run, and to restore anywhere.",
+                     font=("Segoe UI", 11), text_color=theme.TEXT_SEC,
+                     wraplength=420, justify="left").pack(anchor="w", padx=12, pady=(0, 10))
+
+        def finish_common():
+            if first_time:
+                backup.config.set_triggers(DEFAULT_QUICK_CONNECT_TRIGGERS)
+            self._rebuild_backup_section()
+
+        def choose_auto():
+            try:
+                backup.enable_google_managed_key()
+            except Exception as e:
+                messagebox.showerror("Couldn't Finish Setup", str(e), parent=modal)
+                return
+            modal.destroy()
+            finish_common()
+
+        def choose_key():
             try:
                 recovery_key = backup.generate_and_store_key()
             except Exception as e:
-                messagebox.showerror("Couldn't Finish Setup", str(e), parent=self)
-                self._rebuild_backup_section()
+                messagebox.showerror("Couldn't Finish Setup", str(e), parent=modal)
                 return
-            from src.services.backup_service import DEFAULT_QUICK_CONNECT_TRIGGERS
-            backup.config.set_triggers(DEFAULT_QUICK_CONNECT_TRIGGERS)
+            modal.destroy()
             self._show_recovery_key(recovery_key)
-        self._rebuild_backup_section()
+            finish_common()
+
+        def choose_manual():
+            modal.destroy()
+            self._gdrive_set_password(after=finish_common)
+
+        ctk.CTkButton(auto_col, text="Use Automatic", height=32,
+                      fg_color=theme.ACCENT, hover_color="#1C6FBF", text_color="#fff",
+                      font=("Segoe UI", 11), command=choose_auto
+                      ).pack(anchor="w", padx=12, pady=(0, 12))
+        ctk.CTkButton(key_col, text="Use Recovery Key", height=32,
+                      fg_color="transparent", border_color=theme.BORDER, border_width=1,
+                      text_color=theme.ACCENT, font=("Segoe UI", 11), command=choose_key
+                      ).pack(anchor="w", padx=12, pady=(0, 12))
+        ctk.CTkButton(manual_col, text="Use Manual Password", height=32,
+                      fg_color="transparent", border_color=theme.BORDER, border_width=1,
+                      text_color=theme.ACCENT, font=("Segoe UI", 11), command=choose_manual
+                      ).pack(anchor="w", padx=12, pady=(0, 12))
 
     def _show_recovery_key(self, recovery_key: str):
         modal = Modal(self, "Save Your Recovery Key", width=460, height=340)
@@ -876,7 +978,7 @@ class SettingsPanel(ctk.CTkFrame):
         self.ctx.backup.disconnect()
         self._rebuild_backup_section()
 
-    def _gdrive_set_password(self):
+    def _gdrive_set_password(self, after=None):
         modal = Modal(self, "Set Backup Password", width=420, height=300)
         ctk.CTkLabel(modal.body, text="Choose a password to encrypt your backups with. "
                                        "WealthMap never stores it — you'll need it again "
@@ -896,9 +998,17 @@ class SettingsPanel(ctk.CTkFrame):
             if p1 != p2:
                 messagebox.showerror("Error", "Passwords don't match.", parent=modal)
                 return
+            # Switching away from a generated/remembered key onto a
+            # manual one — drop the old one from the OS credential store
+            # so it's not left behind pointing at a password that's no
+            # longer current.
+            self.ctx.backup.clear_stored_key()
             self.ctx.backup.set_password(p1)
             modal.destroy()
-            self._rebuild_backup_section()
+            if after:
+                after()
+            else:
+                self._rebuild_backup_section()
 
         modal.add_buttons("Save", save)
 

@@ -25,20 +25,31 @@ Design notes
   so a supplied password can be checked before attempting a real restore.
   Anyone with access to the Drive files alone (Google included) cannot
   read the backup contents.
-* Two ways to get that password:
+* Three ways to get that password — the person chooses at first connect:
     - Manual: the user picks one and re-enters it once per app session
       to unlock automatic backups (nothing is ever written to disk).
-    - Auto-generated ("recovery key"): WealthMap generates a strong
-      random one, stores it in the OS's own secure credential store
-      (Windows Credential Manager / macOS Keychain / Linux Secret
+    - Recovery key (auto-generated, machine-local): WealthMap generates
+      a strong random one, stores it in the OS's own secure credential
+      store (Windows Credential Manager / macOS Keychain / Linux Secret
       Service, via the `keyring` package) so this PC never has to ask
       again, and shows it to the user exactly once so they can save it
       for restoring on a *different* PC (where there's no OS credential
       entry to read it back from). This is the WhatsApp/Signal-style
-      "recovery key" pattern, and is what Quick Connect uses by default.
-  Both modes reuse the exact same salt/verifier/encryption machinery —
-  an auto-generated key is treated as just a very strong password that
-  happens to be remembered for you instead of typed by you.
+      pattern, and needs nothing beyond the local OS.
+    - Automatic, Google-account-only ("google_managed"): WealthMap
+      generates a key the same way, but *also* escrows it in a small
+      file inside this app's private, hidden Drive storage
+      (`appDataFolder` — invisible in Drive's normal UI, readable only
+      by WealthMap while signed into that account). Restoring on any PC
+      then needs nothing but signing into the same Google account — no
+      key to save or type, ever. The trade-off: unlike the other two
+      modes, backup contents are then only as safe as that Google
+      account's own login — anyone who ever gains access to it (a
+      phishing attack, account recovery abuse, etc.) can also decrypt
+      the backups, and Google's own systems could technically do so too.
+  All three reuse the exact same salt/verifier/encryption machinery — a
+  generated key (local or Google-escrowed) is treated as just a very
+  strong password that happens to be remembered for you instead of typed.
 * Config (which triggers are enabled, the connection state, the password
   salt/verifier, last backup time) lives in `<data_root>/backup_config.json`.
   The OAuth token lives in `<data_root>/gdrive_token.json`. Neither file
@@ -65,8 +76,16 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 # the methods that need them, so the rest of the app (and any environment
 # without these packages installed) doesn't fail just importing this module.
 
-SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+SCOPES = [
+    "https://www.googleapis.com/auth/drive.file",
+    # Needed only for the "Automatic — Google account only" key mode: lets
+    # WealthMap read/write a small file in this app's own private,
+    # hidden storage on the user's Drive (not visible in Drive's normal
+    # UI, not shared with any other app) to escrow the backup key there.
+    "https://www.googleapis.com/auth/drive.appdata",
+]
 BACKUP_FOLDER_NAME = "WealthMap Backups"
+APPDATA_KEY_FILENAME = "wealthmap_key.txt"
 VERIFIER_PLAINTEXT = b"WEALTHMAP-BACKUP-OK"
 KDF_ITERATIONS = 390_000
 DEFAULT_RETAIN = 10
@@ -253,12 +272,13 @@ class GoogleDriveBackupService:
         return recovery_key
 
     def try_silent_unlock(self) -> bool:
-        """If this machine has an auto-generated key saved in its OS
-        credential store, retrieves and verifies it with no user
-        interaction. Returns True if that unlocked the session."""
+        """If this machine has a generated key saved in its OS credential
+        store (either key mode — both cache a local copy for speed),
+        retrieves and verifies it with no user interaction, and no
+        network call. Returns True if that unlocked the session."""
         if self.is_unlocked:
             return True
-        if self.config.get("key_mode") != "auto" or not self.config.has_password:
+        if self.config.get("key_mode") not in ("auto", "google_managed") or not self.config.has_password:
             return False
         try:
             import keyring
@@ -273,13 +293,107 @@ class GoogleDriveBackupService:
             return False
 
     def _forget_stored_key(self):
-        if self.config.get("key_mode") != "auto":
+        if self.config.get("key_mode") not in ("auto", "google_managed"):
             return
         try:
             import keyring
             keyring.delete_password(KEYRING_SERVICE, self._keyring_username())
         except Exception:
             pass
+
+    def clear_stored_key(self):
+        """Public wrapper: drop this PC's locally-remembered key (if any)
+        from the OS credential store. Used when switching to a manual
+        password so no stale generated key is left behind pointing at a
+        password that's no longer current."""
+        self._forget_stored_key()
+
+    # ── Automatic, Google-account-only key (escrowed in Drive appDataFolder) ─
+
+    def enable_google_managed_key(self) -> None:
+        """Generates a backup key, escrows it in this Google account's
+        private appDataFolder (so signing into the same account on *any*
+        PC can fetch it automatically), and also caches it in this PC's
+        OS credential store for instant, offline unlocking here. No
+        recovery key is ever shown to the user — see the trade-off note
+        in this module's docstring before using this."""
+        if not self.is_connected():
+            raise BackupError("Connect Google Drive first.")
+        key = secrets.token_urlsafe(24)
+        self.set_password(key, key_mode="google_managed")
+        try:
+            import keyring
+            keyring.set_password(KEYRING_SERVICE, self._keyring_username(), key)
+        except Exception:
+            pass  # not fatal — the appDataFolder copy below is the source of truth
+
+        try:
+            from googleapiclient.http import MediaInMemoryUpload
+            drive = self._drive()
+            existing_id = self._appdata_key_file_id(drive)
+            media = MediaInMemoryUpload(key.encode("utf-8"), mimetype="text/plain")
+            if existing_id:
+                drive.files().update(fileId=existing_id, media_body=media).execute()
+            else:
+                drive.files().create(
+                    body={"name": APPDATA_KEY_FILENAME, "parents": ["appDataFolder"]},
+                    media_body=media, fields="id"
+                ).execute()
+        except Exception as e:
+            raise BackupError(f"Couldn't save the key to your Google account: {e}") from e
+
+    def _appdata_key_file_id(self, drive) -> Optional[str]:
+        results = drive.files().list(
+            spaces="appDataFolder",
+            q=f"name = '{APPDATA_KEY_FILENAME}' and trashed = false",
+            fields="files(id)"
+        ).execute()
+        files = results.get("files", [])
+        return files[0]["id"] if files else None
+
+    def try_google_managed_unlock(self) -> Optional[str]:
+        """Fetches the backup key from this Google account's private
+        appDataFolder (a network call — only do this right after
+        connecting, e.g. when restoring on a new PC) and, if found,
+        verifies + unlocks the session with it. Returns the raw key
+        string on success (so a caller like the restore flow can pass it
+        straight into restore_from_file without prompting anyone), or
+        None if unavailable for any reason — never raises, so callers
+        can always fall back to asking for a recovery key instead."""
+        if not self.is_connected():
+            return None
+        try:
+            drive = self._drive()
+            file_id = self._appdata_key_file_id(drive)
+            if not file_id:
+                return None
+            import io
+            from googleapiclient.http import MediaIoBaseDownload
+            buf = io.BytesIO()
+            downloader = MediaIoBaseDownload(buf, drive.files().get_media(fileId=file_id))
+            done = False
+            while not done:
+                _, done = downloader.next_chunk()
+            key = buf.getvalue().decode("utf-8").strip()
+        except Exception:
+            return None
+        if not key:
+            return None
+
+        if not self.config.has_password:
+            # First time this key is seen on this machine — register it
+            # locally too, same bookkeeping as enable_google_managed_key.
+            self.set_password(key, key_mode="google_managed")
+            try:
+                import keyring
+                keyring.set_password(KEYRING_SERVICE, self._keyring_username(), key)
+            except Exception:
+                pass
+            return key
+        try:
+            return key if self.verify_and_unlock(key) else None
+        except BackupError:
+            return None
 
     def verify_and_unlock(self, password: str) -> bool:
         """Checks `password` against the stored verifier; if correct,

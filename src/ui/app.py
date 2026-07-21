@@ -391,10 +391,13 @@ class WealthMapApp(ctk.CTk):
     def _maybe_prompt_backup_unlock(self):
         """If automatic backups are configured (connected + password set +
         at least one trigger on) but not yet unlocked for this run of the
-        app: first try a silent unlock (auto-generated recovery keys live
-        in the OS credential store, so most people — anyone who used
-        Quick Connect — never see a prompt at all). Only if that isn't
-        possible (a manually-chosen password) do we ask once; declining
+        app: first try a silent, local-only unlock (both generated-key
+        modes cache a copy in the OS credential store, so most people —
+        anyone who used Quick Connect — never see a prompt at all). If
+        that's unavailable and the key is Google-account-managed, fall
+        back to fetching it from Drive over the network (still no prompt
+        — it only needs the Google sign-in that's already in place). Only
+        a manually-chosen password ever needs asking for, once; declining
         just means automatic backups sit out this session."""
         backup = self.ctx.backup
         if not backup:
@@ -403,6 +406,14 @@ class WealthMapApp(ctk.CTk):
             backup.maybe_daily_backup()
             return
         if not (backup.is_connected() and backup.config.has_password and backup.config.triggers):
+            return
+
+        if backup.config.get("key_mode") == "google_managed":
+            def run():
+                backup.try_google_managed_unlock()
+                self.after(0, lambda: backup.maybe_daily_backup() if backup.is_unlocked else None)
+            import threading
+            threading.Thread(target=run, daemon=True).start()
             return
 
         from src.ui.widgets import Modal
@@ -442,6 +453,10 @@ class WealthMapApp(ctk.CTk):
         backup = self.ctx.backup
         if backup and "on_close" in backup.config.triggers and not backup.is_unlocked:
             backup.try_silent_unlock()
+            if not backup.is_unlocked and backup.config.get("key_mode") == "google_managed":
+                # Worth one network round-trip here since we're about to
+                # do network I/O for the backup itself anyway.
+                backup.try_google_managed_unlock()
         if backup and "on_close" in backup.config.triggers and backup.is_unlocked:
             overlay = None
             try:
