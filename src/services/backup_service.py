@@ -237,8 +237,11 @@ class GoogleDriveBackupService:
             import keyring
         except ImportError as e:
             raise BackupError(
-                "Secure credential storage isn't installed. Run:\n"
-                "  pip install keyring"
+                "A Python package WealthMap needs (`keyring`, for securely storing the "
+                "backup key) isn't installed yet. Open a terminal in the WealthMap folder "
+                "and run:\n\n"
+                "  pip install -r requirements.txt\n\n"
+                "then restart WealthMap and try connecting again."
             ) from e
 
         recovery_key = secrets.token_urlsafe(24)  # ~32 chars, high entropy
@@ -312,6 +315,23 @@ class GoogleDriveBackupService:
         the shared OAuth client needed for one-click Quick Connect."""
         return BUNDLED_CLIENT_SECRET_PATH.is_file()
 
+    @staticmethod
+    def install_bundled_client(source_path: str):
+        """Copies a client_secret.json to the well-known bundled-client
+        location so Quick Connect becomes a true one-click flow from now
+        on — for this person and anyone else using this WealthMap install.
+        Used the first time someone sets up Quick Connect: rather than
+        making them manually place a file on disk before any button
+        appears, picking the file *is* the setup step."""
+        if not os.path.isfile(source_path):
+            raise BackupError(f"File not found: {source_path}")
+        try:
+            with open(source_path, "r", encoding="utf-8") as f:
+                json.load(f)  # sanity-check it's actually JSON before installing it
+        except Exception as e:
+            raise BackupError(f"That doesn't look like a valid client_secret.json: {e}") from e
+        shutil.copy2(source_path, BUNDLED_CLIENT_SECRET_PATH)
+
     def connect(self, client_secret_path: str, mode: str = "advanced"):
         """Runs the OAuth 'installed app' consent flow (opens the user's
         browser). Blocking — call from a background thread. Raises
@@ -321,8 +341,12 @@ class GoogleDriveBackupService:
             from google_auth_oauthlib.flow import InstalledAppFlow
         except ImportError as e:
             raise BackupError(
-                "Google Drive support isn't installed. Run:\n"
-                "  pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib"
+                "A few Python packages WealthMap needs for Google Drive backups aren't "
+                "installed yet on this computer (this is unrelated to the Google Drive "
+                "desktop app — nothing needs to be installed from Google). "
+                "Open a terminal in the WealthMap folder and run:\n\n"
+                "  pip install -r requirements.txt\n\n"
+                "then restart WealthMap and try connecting again."
             ) from e
 
         if not os.path.isfile(client_secret_path):
@@ -360,6 +384,7 @@ class GoogleDriveBackupService:
         self._forget_stored_key()
 
     def _get_credentials(self):
+        from google.auth.exceptions import RefreshError
         from google.auth.transport.requests import Request
         from google.oauth2.credentials import Credentials
 
@@ -367,7 +392,25 @@ class GoogleDriveBackupService:
             raise BackupError("Not connected to Google Drive yet.")
         creds = Credentials.from_authorized_user_file(str(self.token_path), SCOPES)
         if creds.expired and creds.refresh_token:
-            creds.refresh(Request())
+            try:
+                creds.refresh(Request())
+            except RefreshError as e:
+                # The refresh token itself is no longer valid — most often
+                # because it was revoked, or because the Google Cloud
+                # project's OAuth consent screen is still in "Testing"
+                # status (Google expires testing-mode refresh tokens after
+                # 7 days; publishing the app to Production removes that
+                # limit — see README). Drop the stale token so
+                # is_connected() reflects reality instead of claiming to
+                # be connected while every call keeps failing.
+                self.token_path.unlink(missing_ok=True)
+                raise BackupError(
+                    "Google sign-in has expired and needs to be redone (Connect Google Drive "
+                    "again). If this keeps happening every few days, the Google Cloud OAuth "
+                    "consent screen is probably still in \"Testing\" status — publish it to "
+                    "Production so sign-ins stop expiring. "
+                    f"({e})"
+                ) from e
             self.token_path.write_text(creds.to_json())
         return creds
 

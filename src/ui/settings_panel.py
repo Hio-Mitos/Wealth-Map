@@ -590,16 +590,16 @@ class SettingsPanel(ctk.CTkFrame):
                                          "backups just run automatically from then on.",
                          font=("Segoe UI", 11), text_color=theme.TEXT_SEC,
                          wraplength=650, justify="left").pack(anchor="w", padx=12, pady=(0, 8))
-            if GoogleDriveBackupService.is_bundled_client_available():
-                ctk.CTkButton(quick_col, text="Connect Google Drive", width=200, height=34,
-                              fg_color=theme.ACCENT, hover_color="#1C6FBF", text_color="#fff",
-                              font=("Segoe UI", 12), command=self._gdrive_quick_connect
-                              ).pack(anchor="w", padx=12, pady=(0, 12))
-            else:
-                ctk.CTkLabel(quick_col, text="Not set up on this install yet — ask whoever "
-                                             "administers WealthMap, or use Advanced below.",
-                             font=("Segoe UI", 10), text_color=theme.GOLD
-                             ).pack(anchor="w", padx=12, pady=(0, 12))
+            if not GoogleDriveBackupService.is_bundled_client_available():
+                ctk.CTkLabel(quick_col, text="First time on this computer: you'll be asked for a "
+                                             "client_secret.json once, then never again — not just "
+                                             "for you, for anyone else using this install too.",
+                             font=("Segoe UI", 10), text_color=theme.TEXT_SEC,
+                             wraplength=650, justify="left").pack(anchor="w", padx=12, pady=(0, 6))
+            ctk.CTkButton(quick_col, text="Connect Google Drive", width=200, height=34,
+                          fg_color=theme.ACCENT, hover_color="#1C6FBF", text_color="#fff",
+                          font=("Segoe UI", 12), command=self._gdrive_quick_connect
+                          ).pack(anchor="w", padx=12, pady=(0, 12))
 
             adv_col = ctk.CTkFrame(card, fg_color="transparent")
             adv_col.pack(fill="x", padx=16, pady=(0, 4))
@@ -730,11 +730,38 @@ class SettingsPanel(ctk.CTkFrame):
                      wraplength=520, justify="left").pack(side="left", padx=12)
 
     def _gdrive_quick_connect(self):
-        """One click: sign in with Google via the bundled shared client,
-        then — if no password/key exists yet — auto-generate a recovery
-        key, show it once, and turn on sensible default triggers. No
-        further prompts needed after that."""
+        """One click, every time after the first: sign in with Google via
+        the bundled shared client, then — if no password/key exists yet —
+        auto-generate a recovery key, show it once, and turn on sensible
+        default triggers. The very first time on a given install, there's
+        no bundled client yet, so this asks for a client_secret.json once
+        and installs it as that shared client before continuing — nobody,
+        including colleagues afterwards, has to do that step again."""
         backup = self.ctx.backup
+
+        if not GoogleDriveBackupService.is_bundled_client_available():
+            from tkinter import filedialog
+            messagebox.showinfo(
+                "One-Time Setup",
+                "Since this is the first time Quick Connect is being used on this "
+                "install, pick the client_secret.json from your Google Cloud project "
+                "next. After this, Quick Connect is just \"sign in\" — for you and "
+                "anyone else using WealthMap here.",
+                parent=self
+            )
+            path = filedialog.askopenfilename(
+                title="Select your Google OAuth client_secret.json",
+                filetypes=[("JSON", "*.json"), ("All files", "*.*")]
+            )
+            if not path:
+                return
+            try:
+                GoogleDriveBackupService.install_bundled_client(path)
+            except Exception as e:
+                messagebox.showerror("Setup Failed", str(e), parent=self)
+                return
+            self._rebuild_backup_section()
+
         self._set_backup_status("Opening browser to sign in to Google…")
 
         def run():

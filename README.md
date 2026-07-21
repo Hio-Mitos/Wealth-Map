@@ -361,7 +361,11 @@ automatic backups — never stored).
 ### Admin setup — enabling Quick Connect for everyone (one time)
 
 Quick Connect needs a single, app-wide Google OAuth client bundled with
-WealthMap. Create it once:
+WealthMap. You don't need to place this file by hand — the first time
+anyone clicks **Connect Google Drive** on an install that doesn't have one
+yet, WealthMap asks for it once and installs it automatically for every
+future click (yours and colleagues'). So really there's just one thing to
+create in Google Cloud Console first:
 
 1. Go to [console.cloud.google.com](https://console.cloud.google.com/) and
    create a new project (any name).
@@ -371,14 +375,30 @@ WealthMap. Create it once:
    only their own Drive — this doesn't share access between users.)
 4. **APIs & Services → Credentials → Create Credentials → OAuth client ID**
    → application type **Desktop app**.
-5. Download the resulting JSON file and save it as `gdrive_bundled_client.json`
-   in the WealthMap project root (next to `main.py`). It's already in
-   `.gitignore`, so it won't end up in the repo — distribute it to
-   colleagues however you'd share any other file (it identifies the app,
-   not any one person's account, but treat it like a credential anyway).
+5. Download the resulting JSON file — that's what the **Connect Google
+   Drive** button will ask you for the first time it's clicked on this
+   install. From then on, the connection is remembered on disk (in
+   `gdrive_token.json` under your data folder), so closing and reopening
+   WealthMap does **not** disconnect it — you stay signed in across
+   restarts, just like you'd expect.
 
-Once that file is in place, **Connect Google Drive** (Quick Connect) becomes
-available to everyone using this install.
+**Important — stop connections from silently expiring:** by default, a
+freshly-created OAuth consent screen is in **Testing** status, and Google
+automatically expires sign-ins made through it after **7 days**, no matter
+what WealthMap does — that's a Google Cloud policy, not something in the
+app. To make a connection last indefinitely (survive weeks/months of the
+app being closed, not just a restart), go to **OAuth consent screen** in
+Google Cloud Console and click **Publish App** to move it out of Testing
+into Production. If a connection ever does expire, WealthMap will tell you
+clearly in Settings → Backup & Sync and you just reconnect — nothing is
+lost, but it's worth doing this once so it doesn't happen at all.
+
+The bundled client file (`gdrive_bundled_client.json`, in the WealthMap
+project root next to `main.py`) is in `.gitignore` so it won't end up in
+the repo. If you want a colleague's first click to skip the one-time file
+picker too, you can copy that file to their machine yourself ahead of time
+— but it's not required; each person can just supply it themselves the
+first time they click Connect.
 
 ### Restoring on a new PC
 
