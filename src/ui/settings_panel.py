@@ -175,7 +175,28 @@ class SettingsPanel(ctk.CTkFrame):
         ctk.CTkButton(btn_row, text="🗑 Reset All Data", width=140, height=36,
                       fg_color="transparent", border_color=theme.RED, border_width=1,
                       text_color=theme.RED, font=("Segoe UI", 12),
-                      command=self._reset_data).pack(side="left")
+                      command=self._reset_data).pack(side="left", padx=(0, 12))
+
+        revert_enabled = bool(getattr(self.ctx, "has_session_changes", False))
+        self._revert_btn = ctk.CTkButton(
+            btn_row, text="↩ Revert Changes This Session", width=210, height=36,
+            fg_color="transparent", border_color=theme.BORDER, border_width=1,
+            text_color=theme.TEXT_SEC if not revert_enabled else theme.ACCENT,
+            font=("Segoe UI", 12),
+            state="normal" if revert_enabled else "disabled",
+            command=self._revert_session_changes)
+        self._revert_btn.pack(side="left")
+
+        revert_hint = ctk.CTkLabel(
+            data_card,
+            text=("Discards every change you've made since opening this profile "
+                  "just now (like closing a Word document without saving), then "
+                  "reopens it fresh. Only enabled once you've actually changed "
+                  "something this session." if revert_enabled else
+                  "Nothing changed yet this session — nothing to revert."),
+            font=("Segoe UI", 11), text_color=theme.TEXT_SEC,
+            wraplength=560, justify="left")
+        revert_hint.pack(anchor="w", padx=16, pady=(0, 14))
 
         # ── Backup & Sync (Google Drive) ─────────────────────────────────────
         self._section(scroll, row=next_row(), title="Backup & Sync",
@@ -545,6 +566,25 @@ class SettingsPanel(ctk.CTkFrame):
             self.app.navigate("dashboard")
         except Exception as e:
             messagebox.showerror("Reset Error", str(e))
+
+    def _revert_session_changes(self):
+        if not getattr(self.ctx, "has_session_changes", False):
+            return
+        confirm = messagebox.askyesno(
+            "↩ Revert Changes This Session",
+            "This discards every change you've made since opening this "
+            "profile — new/edited accounts, transactions, portfolio "
+            "activity, everything — and reopens the profile exactly as it "
+            "was before. This cannot be undone once confirmed.\n\n"
+            "Continue?",
+            icon="warning"
+        )
+        if not confirm:
+            return
+        try:
+            self.app.revert_session_changes()
+        except Exception as e:
+            messagebox.showerror("Revert Failed", str(e))
 
     # ── Backup & Sync (Google Drive) ────────────────────────────────────────
 

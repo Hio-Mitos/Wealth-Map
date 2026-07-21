@@ -475,6 +475,10 @@ class WealthMapApp(ctk.CTk):
                     overlay.stop()
                 except Exception:
                     pass
+        try:
+            self.ctx.cleanup_session_snapshot()
+        except Exception:
+            pass
         self.switch_profile_requested = False
         self.target_profile_id = None
         self.withdraw()
@@ -483,18 +487,41 @@ class WealthMapApp(ctk.CTk):
 
     def switch_profile(self):
         """Close this window and return to the profile launcher."""
+        try:
+            self.ctx.cleanup_session_snapshot()
+        except Exception:
+            pass
         self.switch_profile_requested = True
         self.withdraw()
         self.update_idletasks()
         self.quit()
 
-    def switch_to_profile(self, profile_id: str):
+    def switch_to_profile(self, profile_id: str, _skip_snapshot_cleanup: bool = False):
         """Close this window and reopen directly on a different profile,
-        bypassing the launcher."""
+        bypassing the launcher. `_skip_snapshot_cleanup` is used internally
+        by "Revert Changes This Session", which has already consumed (and
+        cleaned up) the snapshot itself before calling this."""
+        if not _skip_snapshot_cleanup:
+            try:
+                self.ctx.cleanup_session_snapshot()
+            except Exception:
+                pass
         self.target_profile_id = profile_id
         self.withdraw()
         self.update_idletasks()
         self.quit()
+
+    def revert_session_changes(self):
+        """Discard every change made since this profile was opened this
+        session, then restart directly back into the same profile so the
+        UI reflects the reverted state (matching Word's "discard changes
+        since I opened this document" — works whether or not this session
+        already synced to Google Drive; the next save simply supersedes
+        that cloud version going forward, and older cloud versions remain
+        available via Restore)."""
+        profile_id = self.ctx.profile.get("id")
+        self.ctx.revert_session_changes()  # closes DB + restores snapshot (and cleans it up)
+        self.switch_to_profile(profile_id, _skip_snapshot_cleanup=True)
 
     def _open_profile_switcher(self):
         """Small popup (top-left) listing all profiles to switch to, plus

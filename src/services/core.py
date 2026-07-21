@@ -1477,6 +1477,7 @@ class AppContext:
         att_dir         = str(self.data_dir / "attachments")
         engine, SessionLocal = init_db(db_path)
         self.session    = SessionLocal()
+        self.engine     = engine
 
         # Multi-profile context. `profile` is a dict from ProfileRegistry:
         # {"id", "name", "type": "personal"|"business", "linked": [...]}.
@@ -1511,15 +1512,31 @@ class AppContext:
         if self.registry is not None:
             from src.services.backup_service import GoogleDriveBackupService
             self.backup = GoogleDriveBackupService(self.registry)
-            from sqlalchemy import event as _sa_event
 
-            def _on_commit(_session):
-                if self.backup:
-                    self.backup.mark_dirty()
+        # Session-revert support: has anything been committed since this
+        # AppContext was opened? Independent of the Google Drive backup
+        # feature (works even with no cloud backup configured at all).
+        self._session_dirty = False
+        self._session_snapshot_dir: Optional[Path] = None
 
-            _sa_event.listen(self.session, "after_commit", _on_commit)
-
+        # `_first_run()` (currency re-seeding, first-time settings init)
+        # always commits — run it *before* wiring the after_commit
+        # listeners below, so that app-internal maintenance commits don't
+        # falsely mark this session "dirty" (which would make "Revert
+        # Changes This Session" look active, and trigger a needless cloud
+        # backup, on every single launch even with zero user edits).
         self._first_run()
+
+        from sqlalchemy import event as _sa_event
+
+        def _on_commit(_session):
+            if self.backup:
+                self.backup.mark_dirty()
+            self._session_dirty = True
+
+        _sa_event.listen(self.session, "after_commit", _on_commit)
+
+        self._take_session_snapshot()
 
         # Apply saved theme preference (UI reads this before building widgets)
         from src.ui.theme import theme
@@ -1539,6 +1556,91 @@ class AppContext:
             # / _seed_demo_business below are kept for potential future use,
             # e.g. an opt-in "load sample data" action, but aren't called
             # automatically.)
+
+    # ── Session revert (Word-style "discard changes since I opened this") ──
+
+    @property
+    def has_session_changes(self) -> bool:
+        """True if anything has been committed since this AppContext opened."""
+        return self._session_dirty
+
+    def _take_session_snapshot(self):
+        """
+        Copy this profile's DB (+ WAL/SHM sidecars) and attachments folder to
+        a scratch location (OS temp dir, never inside data_dir so it's never
+        swept into a Google Drive backup archive). Lets the user discard
+        every change made during this session and fall back to how things
+        were the moment the app was opened — independent of, and in addition
+        to, whatever cloud backup history exists.
+        """
+        import tempfile
+        try:
+            snap_dir = Path(tempfile.mkdtemp(prefix="wealthmap_session_"))
+            db_path = self.data_dir / "wealthmap.db"
+            for suffix in ("", "-wal", "-shm"):
+                src = Path(str(db_path) + suffix)
+                if src.exists():
+                    shutil.copy2(src, snap_dir / src.name)
+            att_dir = self.data_dir / "attachments"
+            if att_dir.exists():
+                shutil.copytree(att_dir, snap_dir / "attachments")
+            self._session_snapshot_dir = snap_dir
+        except Exception as e:
+            # Non-fatal: worst case the "revert session" action is just
+            # unavailable this session; the app itself still works fine.
+            print(f"[Session snapshot] {e}")
+            self._session_snapshot_dir = None
+
+    def revert_session_changes(self):
+        """
+        Discard every change made since this AppContext was opened, restoring
+        the DB and attachments to their state at session start. Closes this
+        session's DB connection in the process — the caller MUST tear down
+        this AppContext and open a fresh one (e.g. by restarting into the
+        same profile) immediately afterward; this instance is no longer
+        usable once this returns.
+        """
+        if self._session_snapshot_dir is None or not self._session_snapshot_dir.exists():
+            raise RuntimeError("No session snapshot is available to revert to.")
+
+        # Release SQLite file locks before overwriting the DB file.
+        try:
+            self.session.close()
+        except Exception:
+            pass
+        try:
+            self.engine.dispose()
+        except Exception:
+            pass
+
+        db_path = self.data_dir / "wealthmap.db"
+        for suffix in ("", "-wal", "-shm"):
+            dst = Path(str(db_path) + suffix)
+            src = self._session_snapshot_dir / dst.name
+            if src.exists():
+                shutil.copy2(src, dst)
+            elif dst.exists():
+                # File didn't exist at session start (e.g. no -wal yet) —
+                # remove it so we don't leave post-session state behind.
+                try:
+                    dst.unlink()
+                except Exception:
+                    pass
+
+        att_dir = self.data_dir / "attachments"
+        snap_att = self._session_snapshot_dir / "attachments"
+        if att_dir.exists():
+            shutil.rmtree(att_dir, ignore_errors=True)
+        if snap_att.exists():
+            shutil.copytree(snap_att, att_dir)
+
+        self.cleanup_session_snapshot()
+
+    def cleanup_session_snapshot(self):
+        """Best-effort removal of the temp session snapshot (normal exit path)."""
+        if self._session_snapshot_dir is not None:
+            shutil.rmtree(self._session_snapshot_dir, ignore_errors=True)
+            self._session_snapshot_dir = None
 
     def _seed_demo_personal(self):
         """Add a few starter accounts so the app isn't empty on first launch."""

@@ -195,6 +195,14 @@ class GoogleDriveBackupService:
         self._debounce_timer: Optional[threading.Timer] = None
         self._running = False
 
+        # True once something has changed since the last *successful*
+        # upload. Lets every trigger (on_change / daily / on_close) share
+        # one "is there actually anything new to save?" gate, so a burst of
+        # triggers around the same event (e.g. an on_change debounce firing
+        # right before the user closes the app) never produces more than
+        # one upload for the same state.
+        self._dirty_since_backup = False
+
     # ── Status helper ────────────────────────────────────────────────────
 
     def set_status_callback(self, on_status: Optional[Callable[[str], None]]):
@@ -674,6 +682,7 @@ class GoogleDriveBackupService:
             now_iso = datetime.now(timezone.utc).isoformat()
             self.config.set("last_backup_at", now_iso)
             self.config.set("last_backup_error", None)
+            self._dirty_since_backup = False
             self._status(f"Backup complete ({filename}).")
             return {"ok": True, "filename": filename, "at": now_iso}
         except Exception as e:
@@ -700,10 +709,11 @@ class GoogleDriveBackupService:
     # ── Triggers ─────────────────────────────────────────────────────────
 
     def mark_dirty(self):
-        """Call after any data mutation. If the 'on_change' trigger is
-        enabled, (re)starts a debounce timer so a burst of edits results
-        in one backup a short while after things go quiet, not one per
-        edit."""
+        """Call after any data mutation. Always records that there's
+        something new to save; if the 'on_change' trigger is enabled,
+        also (re)starts a debounce timer so a burst of edits results in
+        one backup a short while after things go quiet, not one per edit."""
+        self._dirty_since_backup = True
         if "on_change" not in self.config.triggers:
             return
         if not (self.is_connected() and self.is_unlocked):
@@ -715,14 +725,31 @@ class GoogleDriveBackupService:
             self._debounce_timer.daemon = True
             self._debounce_timer.start()
 
+    def _cancel_pending_debounce(self):
+        """Stops any queued on_change upload. Called before a close/daily
+        upload so a debounce timer can never fire a second, redundant
+        upload for the same state right after (or during) another one."""
+        with self._lock:
+            if self._debounce_timer:
+                self._debounce_timer.cancel()
+                self._debounce_timer = None
+
     def _debounced_fire(self):
         self.backup_now_async()
+
+    def _needs_backup(self) -> bool:
+        """Is there actually something new worth uploading? True if data
+        has changed since the last successful backup, or if no backup has
+        ever completed (first-ever save)."""
+        return self._dirty_since_backup or not self.config.get("last_backup_at")
 
     def maybe_daily_backup(self):
         if "daily" not in self.config.triggers:
             return
         if not (self.is_connected() and self.is_unlocked):
             return
+        if not self._needs_backup():
+            return  # nothing changed since the last save — skip the duplicate
         last = self.config.get("last_backup_at")
         if last:
             try:
@@ -737,11 +764,22 @@ class GoogleDriveBackupService:
     def backup_on_close_blocking(self, timeout: float = 8.0) -> bool:
         """Best-effort synchronous backup used when the app is closing —
         gives the upload a few seconds to finish but never blocks the
-        close indefinitely. Returns True if it completed in time."""
+        close indefinitely. Returns True if it completed (or there was
+        nothing new to save) in time.
+
+        Guarantees at most one upload for the close event: any pending
+        on_change debounce timer is cancelled first (so it can't also fire
+        and create a second, near-duplicate save), and the upload itself
+        is skipped entirely if nothing has changed since the last
+        successful backup — e.g. an on_change save already captured the
+        current state moments ago."""
+        self._cancel_pending_debounce()
         if "on_close" not in self.config.triggers:
             return True
         if not (self.is_connected() and self.is_unlocked):
             return True
+        if not self._needs_backup():
+            return True  # last save (from any trigger) already covers this state
         done = threading.Event()
         result = {}
 
