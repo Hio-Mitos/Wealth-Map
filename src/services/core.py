@@ -25,7 +25,7 @@ from src.models.database import (
     TransactionCharge, AssetPriceSnapshot,
     CREDIT_TRANSACTION_TYPES, DEBIT_TRANSACTION_TYPES,
     CustomCategory, CustomTransactionType,
-    Payslip, PayslipLineItem
+    Payslip, PayslipLineItem, Bill
 )
 
 # ─── Constants ────────────────────────────────────────────────────────────────
@@ -681,7 +681,9 @@ class TransactionService:
             transfer_group_id_override: Optional[str] = None,
             linked_profile_id: Optional[str] = None,
             linked_account_label: Optional[str] = None,
-            department_id: Optional[int] = None) -> Transaction:
+            department_id: Optional[int] = None,
+            payslip_id: Optional[int] = None,
+            bill_id: Optional[int] = None) -> Transaction:
         """
         charges: optional list of additional fee/tax line items, each a dict
         with keys: kind ('fee'|'tax'), amount, currency_code (optional,
@@ -729,6 +731,8 @@ class TransactionService:
             linked_profile_id=linked_profile_id,
             linked_account_label=linked_account_label,
             department_id=department_id,
+            payslip_id=payslip_id,
+            bill_id=bill_id,
             status=status,
             amount=amount,
             currency_id=cur.id,
@@ -1149,7 +1153,12 @@ class LoanService:
                due_date: Optional[datetime] = None,
                contact_info: str = "",
                fee_amount: float = 0.0, fee_currency_code: Optional[str] = None,
-               fee_description: str = "") -> PersonalLoan:
+               fee_description: str = "",
+               payslip_id: Optional[int] = None) -> PersonalLoan:
+        """`payslip_id`: set only when this loan is being auto-created for a
+        payslip's loan-linked deduction (no existing loan to link to) — lets
+        deleting that payslip remove the loan entirely, since it wouldn't
+        exist without it."""
         cur = self.fx.get_by_code(currency_code)
         if not cur:
             raise ValueError(f"Currency {currency_code} not found")
@@ -1158,6 +1167,7 @@ class LoanService:
             contact_name=contact_name, direction=direction,
             principal=principal, currency_id=cur.id,
             description=description, due_date=due_date,
+            payslip_id=payslip_id,
             contact_info=contact_info,
             fee_amount=fee_amount,
             fee_currency_id=(fee_cur.id if fee_cur else None),
@@ -1195,12 +1205,17 @@ class LoanService:
 
     def record_repayment(self, loan: PersonalLoan, amount: float,
                          repaid_on: Optional[datetime] = None,
-                         notes: str = "", fee_amount: float = 0.0) -> LoanRepayment:
+                         notes: str = "", fee_amount: float = 0.0,
+                         payslip_id: Optional[int] = None) -> LoanRepayment:
+        """`payslip_id`: set when this repayment is being recorded
+        automatically from a payslip's loan-linked deduction — lets
+        deleting that payslip reverse exactly this repayment later."""
         if repaid_on is None:
             repaid_on = datetime.now(timezone.utc)
         rep = LoanRepayment(loan_id=loan.id, amount=amount,
                             fee_amount=fee_amount,
-                            repaid_on=repaid_on, notes=notes)
+                            repaid_on=repaid_on, notes=notes,
+                            payslip_id=payslip_id)
         loan.amount_repaid += amount
         if loan.amount_repaid >= loan.principal:
             loan.is_settled = True
@@ -1379,14 +1394,14 @@ class DepartmentService:
 
 class PayslipService:
     """
-    Persists a fully-parsed payslip (see src/services/payslip_import.py) as
-    a Payslip header row plus one PayslipLineItem per taxable earning,
-    non-taxable earning, deduction, loan balance, and Year-To-Date summary
-    figure — the complete document, not just the net-pay Transaction it
-    produced. This is a plain archive: it doesn't affect account balances
-    (the linked Transaction + its TransactionCharges already do that) — it
-    exists so every individual figure on the payslip stays queryable/visible
-    in the app after the fact.
+    Persists an imported payslip as a Payslip header row plus one
+    PayslipLineItem per taxable earning, non-taxable earning, deduction,
+    loan balance, and Year-To-Date summary figure. Earnings and deductions
+    are imported sequentially, each as its own Transaction (see
+    src/ui/payslip_dialog.py) — this service just records the header and
+    each line item (optionally tagged with the Transaction it produced),
+    so the complete original document stays inspectable and every figure
+    is independently visible (e.g. in the Taxes tab), not just the net pay.
     """
     def __init__(self, session: Session):
         self.db = session
@@ -1395,14 +1410,17 @@ class PayslipService:
         return self.db.query(Payslip).order_by(Payslip.period_end.desc().nullslast()).all()
 
     def get_for_transaction(self, transaction_id: int) -> Optional[Payslip]:
-        return self.db.query(Payslip).filter_by(transaction_id=transaction_id).first()
+        tx = self.db.query(Transaction).get(transaction_id)
+        return tx.payslip if tx else None
 
-    def create_from_parsed(self, parsed: Dict, account: Optional[Account] = None,
-                           transaction: Optional[Transaction] = None) -> Payslip:
+    def create_header(self, parsed: Dict, account: Optional[Account] = None) -> Payslip:
+        """Creates just the Payslip header row (no line items yet) — call
+        `add_item()` for each taxable/non-taxable earning and deduction as
+        they're created sequentially, then for the informational
+        loan-balance/YTD-summary rows."""
         emp = parsed.get("employee", {})
         payslip = Payslip(
             account_id=account.id if account else None,
-            transaction_id=transaction.id if transaction else None,
             employee_code=emp.get("code", ""),
             employee_name=emp.get("name", ""),
             company=parsed.get("company", ""),
@@ -1415,29 +1433,243 @@ class PayslipService:
             source_filename=Path(parsed["source_file"]).name if parsed.get("source_file") else "",
         )
         self.db.add(payslip)
-
-        def add_items(section: str, rows, label_key="label", amount_key="amount", hours_key=None):
-            for row in rows:
-                self.db.add(PayslipLineItem(
-                    payslip=payslip, section=section,
-                    label=row.get(label_key, ""),
-                    hours=row.get(hours_key) if hours_key else None,
-                    amount=row.get(amount_key, 0.0),
-                ))
-
-        add_items("taxable_earning", parsed.get("taxable_earnings", []), hours_key="hours")
-        add_items("non_taxable_earning", parsed.get("non_taxable_earnings", []))
-        add_items("deduction", parsed.get("deductions", []))
-        add_items("loan_balance", parsed.get("loan_balances", []))
-        add_items("ytd_summary", parsed.get("ytd_summary", []))
-
         self.db.commit()
         self.db.refresh(payslip)
         return payslip
 
+    def add_item(self, payslip: Payslip, section: str, label: str, amount: float,
+                hours: Optional[float] = None,
+                transaction: Optional[Transaction] = None) -> PayslipLineItem:
+        item = PayslipLineItem(
+            payslip_id=payslip.id, section=section, label=label,
+            hours=hours, amount=amount,
+            transaction_id=transaction.id if transaction else None,
+        )
+        self.db.add(item)
+        self.db.commit()
+        self.db.refresh(item)
+        return item
+
     def delete(self, payslip: Payslip):
         self.db.delete(payslip)
         self.db.commit()
+
+    def delete_cascade(self, payslip: Payslip) -> Dict[str, int]:
+        """Deletes the payslip AND everything it created: every transaction
+        it generated (salary earnings, deductions, taxes, bill payments —
+        account balances change accordingly), all its line items, its
+        attachments (including the archived PDF), and — correctly this
+        time — its footprint in the Loans tab:
+
+          - Any repayment this payslip recorded is reversed: subtracted
+            back off the loan's amount_repaid (un-settling it if that
+            repayment was what settled it), then removed.
+          - Any loan this payslip auto-created (because there was no
+            existing loan to link the deduction to) is deleted outright,
+            once its own reversed repayment leaves it with no history —
+            it only existed because of this payslip.
+          - A loan that already existed before this payslip, and simply
+            received a repayment from it, is kept — only that specific
+            repayment is undone; the loan and its other history stand.
+
+        Returns counts: {"transactions", "repayments_reversed", "loans_removed"}."""
+        txs = list(payslip.transactions)
+        for tx in txs:
+            self.db.delete(tx)   # charges/attachments cascade via ORM
+
+        repayments = self.db.query(LoanRepayment).filter_by(payslip_id=payslip.id).all()
+        touched_loans = []
+        for rep in repayments:
+            loan = rep.loan
+            if loan:
+                loan.amount_repaid = max(0.0, loan.amount_repaid - (rep.amount or 0.0))
+                if loan.is_settled and loan.amount_repaid < loan.principal:
+                    loan.is_settled = False
+                    loan.settled_at = None
+                touched_loans.append(loan)
+            self.db.delete(rep)
+        self.db.flush()
+        # The loans touched above may still hold a stale, cached
+        # `.repayments` collection referencing the rows we just deleted —
+        # expire it so the ORM doesn't try to cascade-delete them again
+        # (harmless but noisy) when we delete the loan itself below.
+        self.db.expire_all()
+
+        loans_removed = 0
+        auto_created_loans = self.db.query(PersonalLoan).filter_by(payslip_id=payslip.id).all()
+        for loan in auto_created_loans:
+            # Only remove it if it truly has no history left — guards
+            # against a loan that (unusually) also received a manual or
+            # different-payslip repayment on top of this one.
+            remaining = self.db.query(LoanRepayment).filter_by(loan_id=loan.id).count()
+            if remaining == 0:
+                self.db.delete(loan)
+                loans_removed += 1
+
+        self.db.delete(payslip)  # line items + payslip attachments cascade
+        self.db.commit()
+        return {"transactions": len(txs), "repayments_reversed": len(repayments),
+                "loans_removed": loans_removed}
+
+    # ── Computed aggregations ────────────────────────────────────────────
+    # Unlike the "as printed" ytd_summary line items archived with each
+    # payslip, these are calculated live from every imported payslip — so
+    # importing a payslip for an earlier month immediately changes the
+    # year-to-date figures, and each year starts from zero.
+
+    @staticmethod
+    def _pdate(p: Payslip):
+        """The date a payslip is attributed to (period end, falling back
+        to period start, then import time), normalized tz-naive."""
+        d = p.period_end or p.period_start or p.created_at
+        if d is not None and d.tzinfo is not None:
+            d = d.replace(tzinfo=None)
+        return d
+
+    def years(self) -> List[int]:
+        """Every year that has at least one imported payslip, newest first."""
+        ys = {self._pdate(p).year for p in self.get_all() if self._pdate(p)}
+        return sorted(ys, reverse=True)
+
+    def summarize_period(self, start: Optional[datetime] = None,
+                         end: Optional[datetime] = None) -> Dict:
+        """Aggregates every payslip in [start, end] (inclusive, either side
+        optional). Returns:
+          {
+            "start", "end",
+            "payslips": [Payslip, ...]  (chronological),
+            "sections": {section: {label: {"total": float,
+                                            "items": [(Payslip, PayslipLineItem), ...]}}},
+            "totals": {"taxable", "non_taxable", "gross", "deductions", "net"},
+            "currency_code": str,
+          }
+        `net` is the real total: earnings minus deductions.
+        """
+        res = {
+            "start": start, "end": end, "payslips": [],
+            "sections": {"taxable_earning": {}, "non_taxable_earning": {},
+                         "deduction": {}},
+        }
+        for p in self.get_all():
+            d = self._pdate(p)
+            if d is None:
+                continue
+            if start and d < start:
+                continue
+            if end and d > end:
+                continue
+            res["payslips"].append(p)
+            for li in p.line_items:
+                if li.section not in res["sections"]:
+                    continue
+                bucket = res["sections"][li.section].setdefault(
+                    li.label, {"total": 0.0, "items": []})
+                bucket["total"] += li.amount or 0.0
+                bucket["items"].append((p, li))
+
+        res["payslips"].sort(key=lambda p: self._pdate(p))
+        t   = sum(b["total"] for b in res["sections"]["taxable_earning"].values())
+        nt  = sum(b["total"] for b in res["sections"]["non_taxable_earning"].values())
+        ded = sum(b["total"] for b in res["sections"]["deduction"].values())
+        res["totals"] = {"taxable": t, "non_taxable": nt, "gross": t + nt,
+                         "deductions": ded, "net": t + nt - ded}
+        res["currency_code"] = (res["payslips"][-1].currency_code
+                                if res["payslips"] else "")
+        return res
+
+    def ytd_summary(self, year: int) -> Dict:
+        """Calculated year-to-date summary for `year` — resets every new
+        year, and reflects every payslip imported for that year regardless
+        of import order."""
+        return self.summarize_period(datetime(year, 1, 1),
+                                     datetime(year, 12, 31, 23, 59, 59))
+
+
+class BillService:
+    """
+    Recurring/one-time bill tracker. Bills don't affect balances by
+    themselves — paying one creates a normal expense Transaction (tagged
+    with bill_id for history) and this service advances the schedule.
+    """
+    def __init__(self, session: Session, currency_svc: CurrencyService):
+        self.db = session
+        self.fx = currency_svc
+
+    def get_all(self, include_inactive: bool = False) -> List[Bill]:
+        q = self.db.query(Bill)
+        if not include_inactive:
+            q = q.filter_by(is_active=True)
+        return q.order_by(Bill.next_due.asc().nullslast()).all()
+
+    def create(self, name: str, amount: float, currency_code: str,
+               frequency: str = "monthly", next_due: Optional[datetime] = None,
+               account: Optional[Account] = None, payee: str = "",
+               category: str = "Bills & Utilities", notes: str = "") -> Bill:
+        cur = self.fx.get_by_code(currency_code)
+        bill = Bill(
+            name=name.strip(), amount=amount,
+            currency_id=cur.id if cur else None,
+            account_id=account.id if account else None,
+            frequency=frequency if frequency in Bill.FREQUENCIES else "monthly",
+            next_due=next_due, payee=payee.strip(),
+            category=category.strip() or "Bills & Utilities",
+            notes=notes.strip(),
+        )
+        self.db.add(bill)
+        self.db.commit()
+        self.db.refresh(bill)
+        return bill
+
+    def update(self, bill: Bill, **fields) -> Bill:
+        if "currency_code" in fields:
+            cur = self.fx.get_by_code(fields.pop("currency_code"))
+            bill.currency_id = cur.id if cur else bill.currency_id
+        for k, v in fields.items():
+            if hasattr(bill, k):
+                setattr(bill, k, v)
+        self.db.commit()
+        return bill
+
+    def delete(self, bill: Bill):
+        # Payment transactions survive (they're real expenses); just untag.
+        for tx in list(bill.transactions):
+            tx.bill_id = None
+        self.db.delete(bill)
+        self.db.commit()
+
+    @staticmethod
+    def _advance(due: datetime, frequency: str) -> datetime:
+        """Next occurrence after `due` for the given frequency, calendar-safe
+        (e.g. 31 Jan + 1 month → 28/29 Feb)."""
+        import calendar
+        from datetime import timedelta
+        if frequency == "weekly":
+            return due + timedelta(days=7)
+        months = {"monthly": 1, "quarterly": 3, "yearly": 12}.get(frequency, 1)
+        m = due.month - 1 + months
+        year, month = due.year + m // 12, m % 12 + 1
+        day = min(due.day, calendar.monthrange(year, month)[1])
+        return due.replace(year=year, month=month, day=day)
+
+    def record_payment(self, bill: Bill, paid_on: Optional[datetime] = None) -> Bill:
+        """Advances the schedule after a payment transaction was created.
+        One-time bills deactivate instead of rescheduling."""
+        paid_on = paid_on or datetime.now(timezone.utc)
+        bill.last_paid_on = paid_on
+        if bill.frequency == "one_time":
+            bill.is_active = False
+        elif bill.next_due:
+            nxt = self._advance(bill.next_due, bill.frequency)
+            # If several periods were skipped, keep advancing until the
+            # next due date is actually in the future of the payment.
+            guard = 0
+            while nxt <= paid_on.replace(tzinfo=None) and guard < 60:
+                nxt = self._advance(nxt, bill.frequency)
+                guard += 1
+            bill.next_due = nxt
+        self.db.commit()
+        self.db.refresh(bill)
+        return bill
 
 
 # ─── Attachment Service ───────────────────────────────────────────────────────
@@ -1506,6 +1738,8 @@ class AttachmentService:
             att.opportunity_id = owner_id
         elif owner_type == "asset":
             att.asset_id = owner_id
+        elif owner_type == "payslip":
+            att.payslip_id = owner_id
 
         db.add(att)
         db.commit()
@@ -1566,6 +1800,7 @@ class AppContext:
         self.customization = CustomizationService(self.session)
         self.department = DepartmentService(self.session)
         self.payslip    = PayslipService(self.session)
+        self.bill       = BillService(self.session, self.currency)
 
         from src.services.market_data import MarketDataService
         self.market_data = MarketDataService()

@@ -11,7 +11,7 @@ from src.models.database import Receipt
 from src.ui.widgets import (
     SectionHeader, StatCard, DataTable, Modal,
     make_entry, make_combo, make_textbox, fmt_money, fmt_money_base,
-    attach_currency_tooltip, AttachmentSection
+    attach_currency_tooltip, AttachmentSection, CurrencySearchEntry
 )
 from src.ui.theme import theme
 
@@ -269,7 +269,6 @@ class ReceiptsPanel(ctk.CTkFrame):
     def _receipt_modal(self, r):
         is_edit = r is not None
         modal = Modal(self, "Edit Receipt" if is_edit else "New Receipt", width=460, height=620)
-        currencies = [c.code for c in self.ctx.currency.get_all()]
 
         # Recent transactions for linking
         recent_txs = self.ctx.transaction.get_recent(100)
@@ -283,7 +282,7 @@ class ReceiptsPanel(ctk.CTkFrame):
         title_e  = modal.add_field("Title / Item",  lambda p: make_entry(p, "What did you buy?"))
         merch_e  = modal.add_field("Merchant",      lambda p: make_entry(p, "Store or vendor name"))
         amt_e    = modal.add_field("Amount",        lambda p: make_entry(p, "0.00"))
-        cur_c    = modal.add_field("Currency",      lambda p: make_combo(p, currencies))
+        cur_c    = modal.add_field("Currency",      lambda p: CurrencySearchEntry(p, self.ctx))
         attach_currency_tooltip(cur_c, self.ctx)
         date_e   = modal.add_field("Date (YYYY-MM-DD)", lambda p: make_entry(p, "YYYY-MM-DD"))
         cat_c    = modal.add_field("Category",      lambda p: make_combo(p, RECEIPT_CATEGORIES))
@@ -316,6 +315,7 @@ class ReceiptsPanel(ctk.CTkFrame):
             date_e.insert(0, datetime.now().strftime("%Y-%m-%d"))
 
         def save():
+            cur_c.resolve()
             try:
                 title = title_e.get().strip()
                 if not title:

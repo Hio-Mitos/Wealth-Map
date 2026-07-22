@@ -181,7 +181,7 @@ class SettingsPanel(ctk.CTkFrame):
         ctk.CTkButton(btn_row, text="📜 Payslip History", width=150, height=36,
                       fg_color="transparent", border_color=theme.BORDER, border_width=1,
                       text_color=theme.GOLD, font=("Segoe UI", 12),
-                      command=lambda: open_payslip_history(self, self.ctx)).pack(side="left", padx=(0, 12))
+                      command=lambda: open_payslip_history(self, self.ctx, app=self.app)).pack(side="left", padx=(0, 12))
 
         ctk.CTkButton(btn_row, text="🗑 Reset All Data", width=140, height=36,
                       fg_color="transparent", border_color=theme.RED, border_width=1,
@@ -543,8 +543,9 @@ class SettingsPanel(ctk.CTkFrame):
         confirm = messagebox.askyesno(
             "⚠️ Reset All Data",
             "This will permanently delete ALL your accounts, transactions, "
-            "portfolio, loans, receipts, opportunities, and custom "
-            "categories/types.\n\nThis cannot be undone.\n\nAre you absolutely sure?",
+            "portfolio, loans, receipts, opportunities, payslips, bills, "
+            "and custom categories/types.\n\nThis cannot be undone.\n\n"
+            "Are you absolutely sure?",
             icon="warning"
         )
         if not confirm:
@@ -561,11 +562,13 @@ class SettingsPanel(ctk.CTkFrame):
                 Transaction, Account, PortfolioAsset, AssetTrade,
                 PersonalLoan, LoanRepayment, Receipt, Attachment,
                 ExchangeRate, AppSettings, TransactionCharge, AssetPriceSnapshot,
-                Opportunity, CustomCategory, CustomTransactionType
+                Opportunity, CustomCategory, CustomTransactionType,
+                Payslip, PayslipLineItem, Bill
             )
             for model in [Attachment, TransactionCharge, AssetPriceSnapshot,
                           LoanRepayment, AssetTrade, Receipt, Opportunity,
-                          Transaction, PortfolioAsset, PersonalLoan,
+                          PayslipLineItem, Transaction, Payslip, Bill,
+                          PortfolioAsset, PersonalLoan,
                           Account, ExchangeRate, AppSettings,
                           CustomCategory, CustomTransactionType]:
                 self.ctx.session.query(model).delete()

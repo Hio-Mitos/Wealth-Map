@@ -7,10 +7,10 @@ from tkinter import messagebox, filedialog
 import customtkinter as ctk
 from datetime import datetime, timezone
 
-from src.ui.widgets import (safe_rebuild, 
+from src.ui.widgets import (safe_rebuild,
     SectionHeader, StatCard, DataTable, Modal,
     make_entry, make_combo, make_textbox, fmt_money, fmt_money_base,
-    attach_currency_tooltip
+    attach_currency_tooltip, CurrencySearchEntry
 )
 from src.ui.theme import theme
 
@@ -171,13 +171,12 @@ class LoansPanel(ctk.CTkFrame):
 
     def _open_new_loan(self):
         modal = Modal(self, f"New {self.L['modal_title']}", width=480, height=620)
-        currencies = [c.code for c in self.ctx.currency.get_all()]
 
         name_e    = modal.add_field(self.L["name_label"],   lambda p: make_entry(p, self.L["name_placeholder"]))
         contact_e = modal.add_field("Contact Info",   lambda p: make_entry(p, "Email / phone (optional)"))
         dir_c     = modal.add_field("Direction",      lambda p: make_combo(p, self.L["dir_options"]))
         amt_e     = modal.add_field("Amount",         lambda p: make_entry(p, "0.00"))
-        cur_c     = modal.add_field("Currency",       lambda p: make_combo(p, currencies))
+        cur_c     = modal.add_field("Currency",       lambda p: CurrencySearchEntry(p, self.ctx, initial_code="USD"))
         attach_currency_tooltip(cur_c, self.ctx)
         desc_t    = modal.add_field("Description",    lambda p: make_textbox(p, height=60))
 
@@ -187,17 +186,17 @@ class LoansPanel(ctk.CTkFrame):
         fee_row.pack(fill="x", pady=(0, 4))
         fee_amt_e = make_entry(fee_row, "Fee amount")
         fee_amt_e.pack(side="left", fill="x", expand=True, padx=(0, 4))
-        fee_cur_c = make_combo(fee_row, currencies, width=90)
+        fee_cur_c = CurrencySearchEntry(fee_row, self.ctx, width=90, initial_code="USD")
         fee_cur_c.pack(side="left")
         attach_currency_tooltip(fee_cur_c, self.ctx)
         fee_desc_e = make_entry(modal.body, "Fee description")
         fee_desc_e.pack(fill="x", pady=(2, 8))
 
         dir_c.set(self.L["dir_options"][0])
-        cur_c.set("USD")
-        fee_cur_c.set("USD")
 
         def save():
+            cur_c.resolve()
+            fee_cur_c.resolve()
             try:
                 direction = "owed_to_me" if dir_c.get() == self.L["dir_options"][0] else "i_owe"
                 amount = float(amt_e.get().replace(",", ""))
@@ -224,7 +223,6 @@ class LoansPanel(ctk.CTkFrame):
 
     def _edit_loan(self, loan):
         modal = Modal(self, f"Edit {self.L['modal_title']} — {loan.contact_name}", width=480, height=660)
-        currencies = [c.code for c in self.ctx.currency.get_all()]
 
         name_e = modal.add_field(self.L["name_label"], lambda p: make_entry(p))
         name_e.insert(0, loan.contact_name)
@@ -238,8 +236,7 @@ class LoansPanel(ctk.CTkFrame):
         amt_e = modal.add_field("Principal Amount", lambda p: make_entry(p))
         amt_e.insert(0, f"{loan.principal:g}")
 
-        cur_c = modal.add_field("Currency", lambda p: make_combo(p, currencies))
-        cur_c.set(loan.currency.code)
+        cur_c = modal.add_field("Currency", lambda p: CurrencySearchEntry(p, self.ctx, initial_code=loan.currency.code))
         attach_currency_tooltip(cur_c, self.ctx)
 
         desc_t = modal.add_field("Description", lambda p: make_textbox(p, height=60))
@@ -253,9 +250,9 @@ class LoansPanel(ctk.CTkFrame):
         fee_amt_e.pack(side="left", fill="x", expand=True, padx=(0, 4))
         if loan.fee_amount:
             fee_amt_e.insert(0, f"{loan.fee_amount:g}")
-        fee_cur_c = make_combo(fee_row, currencies, width=90)
+        fee_cur_c = CurrencySearchEntry(fee_row, self.ctx, width=90,
+                                        initial_code=(loan.fee_currency or loan.currency).code)
         fee_cur_c.pack(side="left")
-        fee_cur_c.set((loan.fee_currency or loan.currency).code)
         attach_currency_tooltip(fee_cur_c, self.ctx)
         fee_desc_e = make_entry(modal.body, "Fee description")
         fee_desc_e.pack(fill="x", pady=(2, 8))
@@ -267,6 +264,8 @@ class LoansPanel(ctk.CTkFrame):
                         fg_color=theme.ACCENT).pack(anchor="w", pady=(4, 0))
 
         def save():
+            cur_c.resolve()
+            fee_cur_c.resolve()
             try:
                 amount = float(amt_e.get().replace(",", ""))
                 fee_amount = self._parse_float(fee_amt_e.get()) or 0.0

@@ -1234,3 +1234,188 @@ class FeesTaxesReport:
             rb.data_table(headers, trade_rows, col_widths=[16, 30, 14, 14, 14])
 
         return rb.save()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 11. PAYSLIP CASHFLOW REPORT (PDF + XLSX)
+# ─────────────────────────────────────────────────────────────────────────────
+
+SECTION_TITLES_PAYSLIP = {
+    "taxable_earning":     "Taxable Earnings",
+    "non_taxable_earning": "Non-Taxable Earnings",
+    "deduction":           "Deductions",
+}
+
+
+class PayslipCashflowReport:
+    """
+    All payslip cashflow for a period: every earning and deduction label
+    aggregated across the payslips in range, plus a per-payslip breakdown.
+    Net is the real total — earnings minus deductions. Exports as PDF (via
+    the standard report engine) or as a styled XLSX workbook.
+    """
+
+    @staticmethod
+    def _period_note(start_date, end_date) -> str:
+        if not (start_date or end_date):
+            return " (all time)"
+        s = start_date.strftime("%d %b %Y") if start_date else "the beginning"
+        e = end_date.strftime("%d %b %Y") if end_date else "today"
+        return f" ({s} – {e})"
+
+    def generate(self, ctx, output_path: str,
+                 start_date=None, end_date=None) -> str:
+        s = ctx.payslip.summarize_period(start_date, end_date)
+        code = s["currency_code"] or ctx.settings.get("base_currency", "USD")
+        sym = _sym(ctx, code)
+        note = self._period_note(start_date, end_date)
+
+        rb = ReportBuilder("Payslip Cashflow Report",
+                           f"Every earning & deduction across your payslips{note}",
+                           ctx, output_path)
+        t = s["totals"]
+        rb.add_cover([
+            f"Payslips in period: {len(s['payslips'])}",
+            f"Total earnings (gross): {sym}{t['gross']:,.2f} {code}",
+            f"Total deductions: {sym}{t['deductions']:,.2f} {code}",
+            f"Net cashflow (earnings − deductions): {sym}{t['net']:,.2f} {code}",
+        ])
+
+        rb.section("Summary")
+        rb.stat_row([
+            ("Taxable Income",     f"{sym}{t['taxable']:,.2f}",     code, C_GREEN),
+            ("Non-Taxable Income", f"{sym}{t['non_taxable']:,.2f}", code, C_ACCENT),
+            ("Deductions",         f"{sym}{t['deductions']:,.2f}",  code, C_RED),
+            ("Net Cashflow",       f"{sym}{t['net']:,.2f}",         code, C_GOLD),
+        ])
+
+        for section, title in SECTION_TITLES_PAYSLIP.items():
+            buckets = s["sections"][section]
+            if not buckets:
+                continue
+            rb.section(title)
+            rows = []
+            for label, b in sorted(buckets.items(), key=lambda kv: kv[1]["total"], reverse=True):
+                rows.append([label, str(len(b["items"])), _money_cell(b["total"], sym)])
+            total = sum(b["total"] for b in buckets.values())
+            rows.append(["TOTAL", "", _money_cell(total, sym)])
+            rb.data_table([title, "Occurrences", f"Total ({code})"], rows,
+                          col_widths=[50, 20, 30])
+
+        if s["payslips"]:
+            rb.section("Per-Payslip Breakdown")
+            rows = []
+            for p in s["payslips"]:
+                period = (p.period_end or p.period_start)
+                rows.append([
+                    period.strftime("%b %Y") if period else "—",
+                    p.company or "—",
+                    _money_cell(p.gross_pay, sym),
+                    _money_cell(p.total_deductions, sym),
+                    _money_cell(p.net_pay, sym),
+                ])
+            rb.data_table(["Period", "Company", "Gross", "Deductions", "Net"],
+                          rows, col_widths=[18, 34, 16, 16, 16])
+
+        return rb.save()
+
+    def generate_xlsx(self, ctx, output_path: str,
+                      start_date=None, end_date=None) -> str:
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+
+        s = ctx.payslip.summarize_period(start_date, end_date)
+        code = s["currency_code"] or ctx.settings.get("base_currency", "USD")
+        t = s["totals"]
+        note = self._period_note(start_date, end_date)
+
+        wb = openpyxl.Workbook()
+        HDR_FILL = PatternFill("solid", fgColor="161B22")
+        HDR_FONT = Font(color="FFFFFF", bold=True, name="Arial", size=10)
+        TITLE_FONT = Font(color="1F6FEB", bold=True, size=14, name="Arial")
+        MUTED = Font(color="8B949E", size=9, name="Arial")
+        BOLD = Font(bold=True, name="Arial", size=10)
+        GRN = Font(color="1A7F37", bold=True, name="Arial", size=10)
+        RED = Font(color="CF222E", bold=True, name="Arial", size=10)
+        GOLD = Font(color="9A6700", bold=True, name="Arial", size=11)
+        RIGHT = Alignment(horizontal="right")
+        thin = Border(bottom=Side(style="thin", color="D0D7DE"))
+        MONEY_FMT = '#,##0.00'
+
+        def header(ws, row, values, widths=None):
+            for i, v in enumerate(values, 1):
+                c = ws.cell(row=row, column=i, value=v)
+                c.font, c.fill = HDR_FONT, HDR_FILL
+            if widths:
+                for i, w in enumerate(widths, 1):
+                    ws.column_dimensions[get_column_letter(i)].width = w
+
+        # ── Sheet 1: Summary ────────────────────────────────────────────
+        ws = wb.active
+        ws.title = "Summary"
+        ws["A1"] = "PAYSLIP CASHFLOW REPORT"
+        ws["A1"].font = TITLE_FONT
+        ws["A2"] = f"Period{note}  •  Currency: {code}  •  Generated {datetime.now().strftime('%d %b %Y %H:%M')}"
+        ws["A2"].font = MUTED
+        ws.column_dimensions["A"].width = 34
+        ws.column_dimensions["B"].width = 18
+
+        rows = [
+            ("Payslips in period", len(s["payslips"]), BOLD),
+            ("Taxable income", t["taxable"], GRN),
+            ("Non-taxable income", t["non_taxable"], GRN),
+            ("Total earnings (gross)", t["gross"], BOLD),
+            ("Total deductions", -t["deductions"], RED),
+            ("NET CASHFLOW", t["net"], GOLD),
+        ]
+        r = 4
+        for label, val, font in rows:
+            ws.cell(row=r, column=1, value=label).font = BOLD if font is GOLD else Font(name="Arial", size=10)
+            c = ws.cell(row=r, column=2, value=val)
+            c.font, c.alignment, c.border = font, RIGHT, thin
+            if isinstance(val, float):
+                c.number_format = MONEY_FMT
+            r += 1
+
+        # ── Sheet 2: Line items by label ────────────────────────────────
+        ws = wb.create_sheet("Breakdown")
+        r = 1
+        for section, title in SECTION_TITLES_PAYSLIP.items():
+            buckets = s["sections"][section]
+            if not buckets:
+                continue
+            ws.cell(row=r, column=1, value=title.upper()).font = TITLE_FONT
+            r += 1
+            header(ws, r, [title, "Occurrences", f"Total ({code})"], widths=[34, 14, 18])
+            r += 1
+            for label, b in sorted(buckets.items(), key=lambda kv: kv[1]["total"], reverse=True):
+                ws.cell(row=r, column=1, value=label).border = thin
+                ws.cell(row=r, column=2, value=len(b["items"])).border = thin
+                c = ws.cell(row=r, column=3, value=b["total"])
+                c.number_format, c.alignment, c.border = MONEY_FMT, RIGHT, thin
+                r += 1
+            total = sum(b["total"] for b in buckets.values())
+            ws.cell(row=r, column=1, value="TOTAL").font = BOLD
+            c = ws.cell(row=r, column=3, value=total)
+            c.font, c.number_format, c.alignment = BOLD, MONEY_FMT, RIGHT
+            r += 2
+
+        # ── Sheet 3: Per-payslip ────────────────────────────────────────
+        ws = wb.create_sheet("Payslips")
+        header(ws, 1, ["Period", "Company", "Employee",
+                       f"Gross ({code})", f"Deductions ({code})", f"Net ({code})"],
+               widths=[14, 28, 24, 16, 16, 16])
+        r = 2
+        for p in s["payslips"]:
+            period = (p.period_end or p.period_start)
+            ws.cell(row=r, column=1, value=period.strftime("%b %Y") if period else "—").border = thin
+            ws.cell(row=r, column=2, value=p.company or "—").border = thin
+            ws.cell(row=r, column=3, value=p.employee_name or "—").border = thin
+            for col, val in ((4, p.gross_pay), (5, p.total_deductions), (6, p.net_pay)):
+                c = ws.cell(row=r, column=col, value=val)
+                c.number_format, c.alignment, c.border = MONEY_FMT, RIGHT, thin
+            r += 1
+
+        wb.save(output_path)
+        return output_path

@@ -85,3 +85,28 @@ class ThemeManager:
 
 # Singleton — import this everywhere
 theme = ThemeManager()
+
+
+# ── Fonts ─────────────────────────────────────────────────────────────────
+# "Segoe UI Variable" ships with Windows 11 and looks noticeably more
+# modern for large display text; older systems silently fall back to
+# regular Segoe UI. Resolved lazily (needs a Tk root) and cached.
+_display_family = None
+
+
+def display_family() -> str:
+    global _display_family
+    if _display_family is None:
+        try:
+            from tkinter import font as tkfont
+            fams = set(tkfont.families())
+            for cand in ("Segoe UI Variable Display", "Segoe UI Variable Text",
+                         "Segoe UI"):
+                if cand in fams:
+                    _display_family = cand
+                    break
+            else:
+                _display_family = "Segoe UI"
+        except Exception:
+            _display_family = "Segoe UI"
+    return _display_family

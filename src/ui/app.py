@@ -4,14 +4,12 @@ CustomTkinter shell with sidebar navigation, theme switching, and
 responsive layout.
 """
 
-import tkinter as tk
 from tkinter import messagebox
 import customtkinter as ctk
 from datetime import datetime, timezone
-from typing import Optional
 
-from src.ui.theme import theme
-from src.ui.widgets import LoadingOverlay
+from src.ui.theme import theme, display_family
+from src.ui.widgets import LoadingOverlay, animate_label_number
 
 ctk.set_appearance_mode(theme.ctk_mode)
 ctk.set_default_color_theme("blue")
@@ -23,6 +21,9 @@ NAV_ITEMS_PERSONAL = [
     ("📈",  "Portfolio",    "portfolio"),
     ("💸",  "Loans",        "loans"),
     ("🧾",  "Receipts",     "receipts"),
+    ("🏛️", "Taxes",        "taxes"),
+    ("💡",  "Bills",        "bills"),
+    ("📋",  "Payslips",     "payslips"),
     ("💱",  "Exchange",     "exchange"),
     ("📊",  "Wealth Journey","analytics"),
     ("🎯",  "Opportunities","opportunities"),
@@ -39,6 +40,9 @@ NAV_ITEMS_BUSINESS = [
     ("📈",  "Portfolio",    "portfolio"),
     ("📑",  "Receivables & Payables", "loans"),
     ("🧾",  "Receipts",     "receipts"),
+    ("🏛️", "Taxes",        "taxes"),
+    ("💡",  "Bills",        "bills"),
+    ("📋",  "Payslips",     "payslips"),
     ("💱",  "Exchange",     "exchange"),
     ("📊",  "Financial Journey","analytics"),
     ("🎯",  "Opportunities","opportunities"),
@@ -84,8 +88,15 @@ class WealthMapApp(ctk.CTk):
         self._active_nav = None
         self._nav_kwargs = {}
 
+        # Smooth fade-in on launch (degrades gracefully where unsupported)
+        try:
+            self.attributes("-alpha", 0.0)
+        except Exception:
+            pass
+
         self._build_layout()
         self._build_sidebar()
+        self.after(60, lambda: self._fade_window(0.0, 1.0, duration_ms=180))
         default_panel = self.ctx.settings.get("default_panel", "dashboard")
         valid_keys = {key for _, _, key in self.nav_items}
         self.navigate(default_panel if default_panel in valid_keys else "dashboard")
@@ -158,7 +169,7 @@ class WealthMapApp(ctk.CTk):
         logo_frame.pack(padx=16, pady=(20, 8), fill="x")
         ctk.CTkLabel(
             logo_frame, text="💰 WealthMap",
-            font=("Segoe UI", 20, "bold"), text_color=theme.ACCENT
+            font=(display_family(), 20, "bold"), text_color=theme.ACCENT
         ).pack(anchor="w")
         ctk.CTkLabel(
             logo_frame, text=f"{self.ctx.profile.get('name','Personal')} · "
@@ -177,22 +188,34 @@ class WealthMapApp(ctk.CTk):
         ctk.CTkFrame(nav_scroll, height=1, fg_color=theme.BORDER).pack(fill="x", padx=12, pady=(4, 12))
 
         self._nav_buttons = {}
+        self._nav_bars = {}
         for icon, label, key in self.nav_items:
             active = (key == self._active_nav)
+            # Explicit height + no propagation: CTkFrame defaults to
+            # height=200, which would blow the row spacing up otherwise.
+            row = ctk.CTkFrame(nav_scroll, fg_color="transparent", height=42)
+            row.pack(padx=10, pady=2, fill="x")
+            row.pack_propagate(False)
+            # Slim accent indicator bar marking the active section — a
+            # modern touch that also survives hover-color changes.
+            bar = ctk.CTkFrame(row, width=3, height=24, corner_radius=2,
+                               fg_color=theme.ACCENT if active else "transparent")
+            bar.pack(side="left", fill="y", pady=9, padx=(0, 5))
             btn = ctk.CTkButton(
-                nav_scroll,
+                row,
                 text=f"  {icon}  {label}",
                 anchor="w",
                 fg_color=theme.BG_HOVER if active else "transparent",
                 hover_color=theme.BG_HOVER,
                 text_color=theme.ACCENT if active else theme.TEXT_SEC,
-                font=("Segoe UI", 13),
+                font=("Segoe UI", 13, "bold" if active else "normal"),
                 height=38,
                 corner_radius=8,
                 command=lambda k=key: self.navigate(k)
             )
-            btn.pack(padx=10, pady=2, fill="x")
+            btn.pack(side="left", fill="x", expand=True)
             self._nav_buttons[key] = btn
+            self._nav_bars[key] = bar
 
         # Theme toggle
         ctk.CTkFrame(nav_scroll, height=1, fg_color=theme.BORDER).pack(fill="x", padx=12, pady=(12, 8))
@@ -221,9 +244,12 @@ class WealthMapApp(ctk.CTk):
             self._nw_frame, text="NET WORTH  •  tap for details",
             font=("Segoe UI", 9, "bold"), text_color=theme.TEXT_SEC
         ).pack(padx=12, pady=(10, 0), anchor="w")
+        # Keep showing the last known figure across rebuilds (e.g. theme
+        # switches) — the view of data must never reset just because the
+        # chrome was repainted.
         self._nw_value_label = ctk.CTkLabel(
-            self._nw_frame, text="…",
-            font=("Segoe UI", 20, "bold"), text_color=theme.GOLD
+            self._nw_frame, text=getattr(self, "_nw_last_text", None) or "…",
+            font=(display_family(), 20, "bold"), text_color=theme.GOLD
         )
         self._nw_value_label.pack(padx=12, pady=(0, 10), anchor="w")
         for w in (self._nw_frame, self._nw_value_label):
@@ -240,16 +266,58 @@ class WealthMapApp(ctk.CTk):
         theme.set_mode(mode)
         self._apply_theme()
 
+    def _fade_window(self, start: float, end: float, duration_ms: int = 90,
+                     then=None):
+        """Animates the whole window's opacity from `start` to `end` —
+        used to mask the theme-switch rebuild so it reads as one smooth
+        transition instead of several visible repaints. Degrades to an
+        instant switch on platforms without alpha support."""
+        steps = 6
+        try:
+            self.attributes("-alpha", start)
+        except Exception:
+            if then:
+                then()
+            return
+        delta = (end - start) / steps
+        interval = max(1, duration_ms // steps)
+
+        def step(i=0):
+            v = start + delta * (i + 1)
+            try:
+                self.attributes("-alpha", max(0.0, min(1.0, v)))
+            except Exception:
+                pass
+            if i + 1 < steps:
+                self.after(interval, lambda: step(i + 1))
+            elif then:
+                then()
+        step()
+
     def _apply_theme(self):
-        ctk.set_appearance_mode(theme.ctk_mode)
-        self.ctx.settings.set("theme_mode", theme.mode)
-        self.configure(fg_color=theme.BG_DARK)
-        self.content_frame.configure(fg_color=theme.BG_DARK)
-        self.status_bar.configure(fg_color=theme.BG_CARD)
-        self.status_label.configure(text_color=theme.TEXT_SEC)
-        self.rate_label.configure(text_color=theme.ACCENT)
-        self._build_sidebar()
-        self._reload_current_panel()
+        """Fluent theme switch: dip the window's opacity, do the entire
+        recolor + rebuild in one synchronous pass (no loading spinner, no
+        artificial delay), then fade back in."""
+        if getattr(self, "_theme_switching", False):
+            return
+        self._theme_switching = True
+
+        def swap():
+            ctk.set_appearance_mode(theme.ctk_mode)
+            self.ctx.settings.set("theme_mode", theme.mode)
+            self.configure(fg_color=theme.BG_DARK)
+            self.content_frame.configure(fg_color=theme.BG_DARK)
+            self.status_bar.configure(fg_color=theme.BG_CARD)
+            self.status_label.configure(text_color=theme.TEXT_SEC)
+            self.rate_label.configure(text_color=theme.ACCENT)
+            self._build_sidebar()
+            self._reload_current_panel(instant=True)
+            self._update_net_worth()
+            self.update_idletasks()
+            self._fade_window(0.55, 1.0, duration_ms=140,
+                              then=lambda: setattr(self, "_theme_switching", False))
+
+        self._fade_window(1.0, 0.55, duration_ms=90, then=swap)
 
     # ── Navigation ────────────────────────────────────────────────────────────
 
@@ -258,18 +326,40 @@ class WealthMapApp(ctk.CTk):
         # Deactivate old
         if self._active_nav and self._active_nav in self._nav_buttons:
             self._nav_buttons[self._active_nav].configure(
-                fg_color="transparent", text_color=theme.TEXT_SEC
+                fg_color="transparent", text_color=theme.TEXT_SEC,
+                font=("Segoe UI", 13)
             )
+            if self._active_nav in getattr(self, "_nav_bars", {}):
+                self._nav_bars[self._active_nav].configure(fg_color="transparent")
         # Activate new
         if key in self._nav_buttons:
             self._nav_buttons[key].configure(
-                fg_color=theme.BG_HOVER, text_color=theme.ACCENT
+                fg_color=theme.BG_HOVER, text_color=theme.ACCENT,
+                font=("Segoe UI", 13, "bold")
             )
+            if key in getattr(self, "_nav_bars", {}):
+                self._nav_bars[key].configure(fg_color=theme.ACCENT)
         self._active_nav = key
         self._reload_current_panel()
         self._update_net_worth()
 
-    def _reload_current_panel(self):
+    def _reload_current_panel(self, instant: bool = False):
+        self._nav_token = getattr(self, "_nav_token", 0) + 1
+        token = self._nav_token
+
+        if instant:
+            # Synchronous rebuild with no spinner or delay — used by theme
+            # switching, where an intermediate loading screen would break
+            # the illusion of one smooth transition.
+            for w in self.content_frame.winfo_children():
+                w.destroy()
+            self._panels = {}
+            panel = self._load_panel(self._active_nav, **self._nav_kwargs)
+            if panel:
+                panel.pack(fill="both", expand=True)
+                self._panels[self._active_nav] = panel
+            return
+
         for w in self.content_frame.winfo_children():
             w.destroy()
 
@@ -278,9 +368,6 @@ class WealthMapApp(ctk.CTk):
         overlay = LoadingOverlay(self.content_frame, label=label)
         overlay.pack(fill="both", expand=True)
         self.update_idletasks()
-
-        self._nav_token = getattr(self, "_nav_token", 0) + 1
-        token = self._nav_token
 
         def finish():
             overlay.stop()
@@ -294,7 +381,7 @@ class WealthMapApp(ctk.CTk):
                 panel.pack(fill="both", expand=True)
                 self._panels[self._active_nav] = panel
 
-        self.after(260, finish)
+        self.after(160, finish)
 
     def _load_panel(self, key: str, **kwargs):
         # Import lazily to keep startup fast
@@ -316,6 +403,15 @@ class WealthMapApp(ctk.CTk):
         elif key == "receipts":
             from src.ui.receipts import ReceiptsPanel
             return ReceiptsPanel(self.content_frame, self.ctx, self)
+        elif key == "taxes":
+            from src.ui.taxes_panel import TaxesPanel
+            return TaxesPanel(self.content_frame, self.ctx, self)
+        elif key == "bills":
+            from src.ui.bills_panel import BillsPanel
+            return BillsPanel(self.content_frame, self.ctx, self)
+        elif key == "payslips":
+            from src.ui.payslips_panel import PayslipsPanel
+            return PayslipsPanel(self.content_frame, self.ctx, self)
         elif key == "exchange":
             from src.ui.exchange import ExchangePanel
             return ExchangePanel(self.content_frame, self.ctx, self)
@@ -350,9 +446,15 @@ class WealthMapApp(ctk.CTk):
             total = snap["total"] + port["total_value"] + loan["owed_to_me"] - loan["i_owe"]
             cur = self.ctx.currency.get_by_code(base)
             sym = cur.symbol if cur else ""
-            self._nw_value_label.configure(text=f"{sym}{total:,.2f}")
+            new_text = f"{sym}{total:,.2f}"
+            # Only animate when the figure actually changed — refreshes
+            # that leave it identical would otherwise re-sweep pointlessly.
+            if new_text != getattr(self, "_nw_last_text", None):
+                self._nw_last_text = new_text
+                animate_label_number(self._nw_value_label, new_text)
         except Exception:
             self._nw_value_label.configure(text="—")
+            self._nw_last_text = None  # force a real update next time
 
     def _update_status_bar(self):
         try:

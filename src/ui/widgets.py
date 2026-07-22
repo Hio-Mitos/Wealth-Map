@@ -4,11 +4,54 @@ All colours are resolved from `theme` at *construction time* — rebuilding a
 panel after a theme switch automatically re-applies the new palette.
 """
 
+import re
 import tkinter as tk
 import customtkinter as ctk
 from typing import Callable, Optional, List, Tuple
 
-from src.ui.theme import theme
+from src.ui.theme import theme, display_family
+
+_NUM_RE = re.compile(r"-?[\d,]+(?:\.\d+)?")
+
+
+def animate_label_number(label, final_text: str, duration_ms: int = 450,
+                         steps: int = 18):
+    """Animates a label's numeric portion counting up from 0 to its final
+    value with an ease-out curve — e.g. "$1,234.56" sweeps 0.00 → 1,234.56
+    while keeping the surrounding symbols intact. Non-numeric text (or a
+    zero value) is just set directly."""
+    m = _NUM_RE.search(final_text or "")
+    if not m:
+        label.configure(text=final_text)
+        return
+    try:
+        target = float(m.group(0).replace(",", ""))
+    except ValueError:
+        label.configure(text=final_text)
+        return
+    if target == 0:
+        label.configure(text=final_text)
+        return
+    prefix, suffix = final_text[:m.start()], final_text[m.end():]
+    decimals = len(m.group(0).split(".")[1]) if "." in m.group(0) else 0
+    interval = max(1, duration_ms // steps)
+
+    def step(i=0):
+        try:
+            if not label.winfo_exists():
+                return
+            if i + 1 >= steps:
+                label.configure(text=final_text)
+                return
+            t = (i + 1) / steps
+            eased = 1 - (1 - t) ** 3  # ease-out cubic
+            label.configure(text=f"{prefix}{target * eased:,.{decimals}f}{suffix}")
+            label.after(interval, lambda: step(i + 1))
+        except Exception:
+            pass
+
+    label.configure(text=f"{prefix}{0:,.{decimals}f}{suffix}")
+    step()
 
 # Re-export so existing `from src.ui.widgets import BG_DARK` style imports in
 # legacy code still resolve at *import* time to *something* — but all new
@@ -223,6 +266,7 @@ class CurrencySearchEntry(ctk.CTkEntry):
             self.insert(0, self._current_code)
 
         self._popup = None
+        self._popup_rows: List = []
         self._filtered: List = []
         self._highlight_idx = -1
 
@@ -248,6 +292,16 @@ class CurrencySearchEntry(ctk.CTkEntry):
         self.delete(0, "end")
         self.insert(0, code)
         self._close_popup()
+
+    def set_on_pick(self, callback: Optional[Callable[[str], None]]):
+        """Lets callers wire up a live-update hook after construction —
+        e.g. `cur_c.set_on_pick(lambda code: update_preview())` — mirroring
+        the `.configure(command=...)` pattern used with `CTkComboBox`
+        elsewhere (CTkEntry has no such option, so this fills the same
+        role). Fires when the user explicitly picks a currency (click or
+        Enter), matching a combobox's command semantics — not on every
+        keystroke and not on `.set()` calls made from code."""
+        self._on_pick = callback
 
     def resolve(self):
         """Forces whatever's currently typed to resolve to a valid code
@@ -336,16 +390,15 @@ class CurrencySearchEntry(ctk.CTkEntry):
         if not self._popup:
             self._on_key()
             return "break"
-        self._highlight_idx = min(self._highlight_idx + 1,
-                                  min(len(self._filtered), self._MAX_VISIBLE_ROWS) - 1)
-        self._render_popup()
+        idx = min(self._highlight_idx + 1,
+                 min(len(self._filtered), self._MAX_VISIBLE_ROWS) - 1)
+        self._set_highlight(idx)
         return "break"
 
     def _on_arrow_up(self, event=None):
         if not self._popup:
             return "break"
-        self._highlight_idx = max(self._highlight_idx - 1, 0)
-        self._render_popup()
+        self._set_highlight(max(self._highlight_idx - 1, 0))
         return "break"
 
     def _on_return(self, event=None):
@@ -390,6 +443,7 @@ class CurrencySearchEntry(ctk.CTkEntry):
         inner = tk.Frame(outer, bg=theme.BG_CARD)
         inner.pack(padx=1, pady=1)
 
+        self._popup_rows = []
         shown = self._filtered[:self._MAX_VISIBLE_ROWS]
         for i, cur in enumerate(shown):
             is_hl = (i == self._highlight_idx)
@@ -405,6 +459,7 @@ class CurrencySearchEntry(ctk.CTkEntry):
             for w in (row, lbl):
                 w.bind("<Button-1>", lambda e, code=cur.code: self._pick(code))
                 w.bind("<Enter>", lambda e, idx=i: self._set_highlight(idx))
+            self._popup_rows.append((row, lbl))
 
         if len(self._filtered) > self._MAX_VISIBLE_ROWS:
             more = len(self._filtered) - self._MAX_VISIBLE_ROWS
@@ -413,8 +468,25 @@ class CurrencySearchEntry(ctk.CTkEntry):
                     anchor="w", padx=10, pady=4).pack(fill="x")
 
     def _set_highlight(self, idx: int):
+        """Updates which row looks highlighted without tearing down and
+        rebuilding the popup — recreating the whole window on every mouse
+        hover (the previous approach) made it flicker/blink continuously,
+        since destroying+recreating it under a stationary cursor
+        immediately re-triggers another <Enter> event on the new window,
+        in a loop."""
+        if self._popup is None or not self._popup_rows:
+            self._highlight_idx = idx
+            return
+        if idx == self._highlight_idx:
+            return
         self._highlight_idx = idx
-        self._render_popup()
+        for i, (row, lbl) in enumerate(self._popup_rows):
+            bg = theme.BG_SELECTED if i == idx else theme.BG_CARD
+            try:
+                row.configure(bg=bg)
+                lbl.configure(bg=bg)
+            except Exception:
+                pass
 
     def _close_popup(self):
         if self._popup is not None:
@@ -423,6 +495,7 @@ class CurrencySearchEntry(ctk.CTkEntry):
             except Exception:
                 pass
             self._popup = None
+        self._popup_rows = []
 
 
 # ── Section Header ─────────────────────────────────────────────────────────────
@@ -441,7 +514,7 @@ class SectionHeader(ctk.CTkFrame):
         left = ctk.CTkFrame(self, fg_color="transparent")
         left.grid(row=0, column=0, sticky="w")
         ctk.CTkLabel(left, text=title,
-                     font=("Segoe UI", 22, "bold"), text_color=theme.TEXT_PRI).pack(anchor="w")
+                     font=(display_family(), 22, "bold"), text_color=theme.TEXT_PRI).pack(anchor="w")
         if subtitle:
             ctk.CTkLabel(left, text=subtitle,
                          font=("Segoe UI", 12), text_color=theme.TEXT_SEC).pack(anchor="w")
@@ -487,9 +560,12 @@ class StatCard(ctk.CTkFrame):
         ctk.CTkLabel(top, text=label.upper(),
                      font=("Segoe UI", 10, "bold"), text_color=theme.TEXT_SEC).pack(side="left")
 
-        ctk.CTkLabel(self, text=value,
-                     font=("Segoe UI", 24, "bold"), text_color=accent,
-                     anchor="w").pack(padx=16, pady=(0, 4), anchor="w")
+        self._value_label = ctk.CTkLabel(
+            self, text=value,
+            font=(display_family(), 24, "bold"), text_color=accent,
+            anchor="w")
+        self._value_label.pack(padx=16, pady=(0, 4), anchor="w")
+        animate_label_number(self._value_label, value)
         if sub:
             ctk.CTkLabel(self, text=sub,
                          font=("Segoe UI", 11), text_color=theme.TEXT_SEC,
@@ -498,10 +574,39 @@ class StatCard(ctk.CTkFrame):
         if on_click:
             self._bind_click(self, on_click)
 
+        # Subtle hover "elevation": border tints to the card's accent while
+        # the pointer is anywhere over the card.
+        self._accent = accent
+        self._bind_hover(self)
+
     def _bind_click(self, widget, cmd):
         widget.bind("<Button-1>", lambda e: cmd())
         for child in widget.winfo_children():
             self._bind_click(child, cmd)
+
+    def _bind_hover(self, widget):
+        widget.bind("<Enter>", self._on_hover_enter, add="+")
+        widget.bind("<Leave>", self._on_hover_leave, add="+")
+        for child in widget.winfo_children():
+            self._bind_hover(child)
+
+    def _on_hover_enter(self, event=None):
+        try:
+            self.configure(border_color=self._accent)
+        except Exception:
+            pass
+
+    def _on_hover_leave(self, event=None):
+        # <Leave> also fires when moving onto a child widget — only reset
+        # once the pointer has actually left the card's bounds.
+        try:
+            px, py = self.winfo_pointerxy()
+            wx, wy = self.winfo_rootx(), self.winfo_rooty()
+            if not (wx <= px < wx + self.winfo_width() and
+                    wy <= py < wy + self.winfo_height()):
+                self.configure(border_color=theme.BORDER)
+        except Exception:
+            pass
 
 
 # ── Data Table ────────────────────────────────────────────────────────────────
@@ -598,6 +703,17 @@ class DataTable(ctk.CTkScrollableFrame):
         rf.bind("<Button-1>", _click)
         for child in rf.winfo_children():
             child.bind("<Button-1>", _click)
+
+        # Hover highlight (skipped for the selected row and while editing)
+        def _hover_on(event, f=rf):
+            if self._editing_index is None and f.cget("fg_color") != theme.BG_SELECTED:
+                f.configure(fg_color=theme.BG_HOVER)
+
+        def _hover_off(event, f=rf, idx=i):
+            if self._editing_index is None and f.cget("fg_color") != theme.BG_SELECTED:
+                f.configure(fg_color=self._row_bg(idx))
+        rf.bind("<Enter>", _hover_on)
+        rf.bind("<Leave>", _hover_off)
 
         if self._editable_cols and self._on_row_save:
             edit_btn = ctk.CTkButton(rf, text="✎ Edit", width=66, height=26,
@@ -869,6 +985,22 @@ class Modal(ctk.CTkToplevel):
         self.grab_set()
         self.lift()
 
+        # Center over the parent window and fade in for a smoother,
+        # more modern open (degrades to instant where alpha isn't supported).
+        try:
+            self.update_idletasks()
+            top = parent.winfo_toplevel()
+            x = top.winfo_rootx() + max(0, (top.winfo_width() - width) // 2)
+            y = top.winfo_rooty() + max(0, (top.winfo_height() - height) // 2)
+            self.geometry(f"{width}x{height}+{x}+{y}")
+        except Exception:
+            pass
+        try:
+            self.attributes("-alpha", 0.0)
+            self._fade_in()
+        except Exception:
+            pass
+
         # Header
         hdr = ctk.CTkFrame(self, fg_color=theme.BG_CARD, corner_radius=0, height=52)
         hdr.pack(fill="x")
@@ -887,6 +1019,16 @@ class Modal(ctk.CTkToplevel):
         self.footer = ctk.CTkFrame(self, fg_color=theme.BG_CARD, corner_radius=0, height=60)
         self.footer.pack(fill="x", side="bottom")
         self.footer.pack_propagate(False)
+
+    def _fade_in(self, step: int = 0, steps: int = 6):
+        if not self.winfo_exists():
+            return
+        try:
+            self.attributes("-alpha", min(1.0, (step + 1) / steps))
+        except Exception:
+            return
+        if step + 1 < steps:
+            self.after(16, lambda: self._fade_in(step + 1, steps))
 
     def add_field(self, label: str, widget_factory: Callable, pady=8) -> ctk.CTkBaseClass:
         row = ctk.CTkFrame(self.body, fg_color="transparent")

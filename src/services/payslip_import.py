@@ -55,11 +55,18 @@ LINE_CLUSTER_TOL   = 3    # pt; words within this many pts of 'top' are the same
 # statutory or company deductions — these are offered for Loans-tab linking.
 LOAN_DEDUCTION_LABELS = {"CRITICAL ILLNESS", "COMPANY EMERGENCY LOAN"}
 
-# Deduction labels that are government/statutory withholdings (tracked as
-# 'tax' TransactionCharges); everything else defaults to 'fee'.
+# Deduction labels that are actual taxes (withholding tax) — imported as
+# Tax transactions and surfaced in the Taxes tab.
 STATUTORY_DEDUCTION_LABELS = {
-    "SSS WISP", "SSS CONTRIBUTION", "PHILHEALTH CONTRIBUTION",
-    "WTAX", "WTAX VARIABLE", "HDMF",
+    "WTAX", "WTAX VARIABLE",
+}
+
+# Deduction labels that are recurring contributions/bills rather than taxes
+# — imported as expense transactions linked to a Bill record in the Bills
+# tab (auto-created on first import), so each keeps its payment history.
+BILL_DEDUCTION_LABELS = {
+    "SSS CONTRIBUTION", "PHILHEALTH CONTRIBUTION", "SSS WISP",
+    "ESPP DEDUCTION", "HDMF",
 }
 
 
@@ -151,7 +158,7 @@ def parse_payslip_pdf(path) -> Dict[str, Any]:
       "period_end": datetime | None,
       "taxable_earnings": [{"label", "hours", "amount"}, ...],
       "non_taxable_earnings": [...],
-      "deductions": [{"label", "amount", "is_loan", "is_statutory"}, ...],
+      "deductions": [{"label", "amount", "is_loan", "is_statutory", "is_bill"}, ...],
       "totals": {"taxable": float, "non_taxable": float, "deductions": float},
       "loan_balances": [{"label", "amount"}, ...],
       "ytd_summary": [{"label", "amount"}, ...],
@@ -255,6 +262,7 @@ def parse_payslip_pdf(path) -> Dict[str, Any]:
             "amount": _num(amt),
             "is_loan": norm in LOAN_DEDUCTION_LABELS,
             "is_statutory": norm in STATUTORY_DEDUCTION_LABELS,
+            "is_bill": norm in BILL_DEDUCTION_LABELS,
         })
 
     # ── Totals row for the top table band ───────────────────────────────

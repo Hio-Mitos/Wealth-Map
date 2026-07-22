@@ -8,10 +8,10 @@ import customtkinter as ctk
 from datetime import datetime, timezone
 
 from src.models.database import AssetType
-from src.ui.widgets import (safe_rebuild, 
+from src.ui.widgets import (safe_rebuild,
     SectionHeader, StatCard, DataTable, Modal,
     make_entry, make_combo, make_textbox, fmt_money, fmt_money_base,
-    attach_currency_tooltip, AttachmentSection
+    attach_currency_tooltip, AttachmentSection, CurrencySearchEntry
 )
 from src.ui.theme import theme
 
@@ -179,7 +179,6 @@ class PortfolioPanel(ctk.CTkFrame):
 
     def _open_asset_modal(self, asset):
         modal = Modal(self, f"{asset.name} ({asset.ticker or '—'})", width=520, height=760)
-        currencies = [c.code for c in self.ctx.currency.get_all()]
         asset_types = [t.value for t in AssetType]
 
         cur = asset.currency
@@ -267,8 +266,7 @@ class PortfolioPanel(ctk.CTkFrame):
         cost_e = modal.add_field("Average Cost / Unit", lambda p: make_entry(p))
         cost_e.insert(0, f"{asset.average_cost:g}")
 
-        cur_c = modal.add_field("Currency", lambda p: make_combo(p, currencies))
-        cur_c.set(cur.code)
+        cur_c = modal.add_field("Currency", lambda p: CurrencySearchEntry(p, self.ctx, initial_code=cur.code))
         attach_currency_tooltip(cur_c, self.ctx)
 
         price_e = modal.add_field("Current Price (manual override)", lambda p: make_entry(p))
@@ -355,6 +353,7 @@ class PortfolioPanel(ctk.CTkFrame):
                       text_color=theme.ACCENT, command=attach_file).pack(anchor="w", pady=(2, 8))
 
         def save():
+            cur_c.resolve()
             try:
                 atype = next(t for t in AssetType if t.value == type_c.get())
                 fields = dict(
@@ -448,7 +447,6 @@ class PortfolioPanel(ctk.CTkFrame):
             modal.destroy()
             return
         asset_types = [t.value for t in AssetType]
-        currencies  = [c.code for c in self.ctx.currency.get_all()]
 
         acc_c   = modal.add_field("Portfolio Account",  lambda p: make_combo(p, acc_names))
         type_c  = modal.add_field("Asset Type",         lambda p: make_combo(p, asset_types,
@@ -470,7 +468,7 @@ class PortfolioPanel(ctk.CTkFrame):
         fetch_status_lbl = ctk.CTkLabel(modal.body, text="", font=("Segoe UI", 10),
                                         text_color=theme.ACCENT, anchor="w")
         fetch_status_lbl.pack(fill="x", pady=(0, 4))
-        cur_c   = modal.add_field("Currency",           lambda p: make_combo(p, currencies))
+        cur_c   = modal.add_field("Currency",           lambda p: CurrencySearchEntry(p, self.ctx, initial_code="USD"))
         attach_currency_tooltip(cur_c, self.ctx)
 
         # Purchase date & time — seeds the initial trade-history entry
@@ -561,10 +559,10 @@ class PortfolioPanel(ctk.CTkFrame):
 
         acc_c.set(acc_names[0])
         type_c.set("Stock")
-        cur_c.set("USD")
         on_type_change("Stock")
 
         def save():
+            cur_c.resolve()
             try:
                 acc = next(a for a in accounts if a.name == acc_c.get())
                 atype = next(t for t in AssetType if t.value == type_c.get())

@@ -8,10 +8,10 @@ import customtkinter as ctk
 from datetime import datetime, timezone
 
 from src.models.database import AccountType
-from src.ui.widgets import (safe_rebuild, 
+from src.ui.widgets import (safe_rebuild,
     SectionHeader, StatCard, DataTable, Modal,
     make_entry, make_combo, make_textbox, fmt_money,
-    attach_currency_tooltip, responsive_columns
+    attach_currency_tooltip, responsive_columns, CurrencySearchEntry
 )
 from src.ui.theme import theme
 
@@ -147,14 +147,13 @@ class AccountsPanel(ctk.CTkFrame):
         modal = Modal(self, "New Account", width=480, height=640)
         b = modal.body
 
-        currencies = [c.code for c in self.ctx.currency.get_all()]
         acc_types  = [t.value for t in AccountType]
 
         name_e   = modal.add_field("Account Name",    lambda p: make_entry(p, "e.g. Main Chequing"))
         type_c   = modal.add_field("Account Type",    lambda p: make_combo(p, acc_types, command=lambda v: self._toggle_cc_fields(cc_frame, v)))
         inst_e   = modal.add_field("Institution",     lambda p: make_entry(p, "Bank / Broker / Card issuer"))
         acno_e   = modal.add_field("Account Number",  lambda p: make_entry(p, "Last 4 digits (optional)"))
-        cur_c    = modal.add_field("Currency",        lambda p: make_combo(p, currencies))
+        cur_c    = modal.add_field("Currency",        lambda p: CurrencySearchEntry(p, self.ctx))
         attach_currency_tooltip(cur_c, self.ctx)
         desc_t   = modal.add_field("Description",     lambda p: make_textbox(p, height=60))
 
@@ -196,6 +195,7 @@ class AccountsPanel(ctk.CTkFrame):
             if not name:
                 messagebox.showerror("Error", "Account name is required.", parent=modal)
                 return
+            cur_c.resolve()
             try:
                 atype = next(t for t in AccountType if t.value == type_c.get())
                 kwargs = {}
@@ -233,7 +233,6 @@ class AccountsPanel(ctk.CTkFrame):
         modal = Modal(self, f"Edit — {acc.name}", width=480, height=780)
         b = modal.body
 
-        currencies = [c.code for c in self.ctx.currency.get_all()]
         acc_types  = [t.value for t in AccountType]
 
         name_e = modal.add_field("Account Name", lambda p: make_entry(p))
@@ -248,8 +247,7 @@ class AccountsPanel(ctk.CTkFrame):
         acno_e = modal.add_field("Account Number", lambda p: make_entry(p))
         acno_e.insert(0, acc.account_number or "")
 
-        cur_c = modal.add_field("Currency", lambda p: make_combo(p, currencies))
-        cur_c.set(acc.currency.code)
+        cur_c = modal.add_field("Currency", lambda p: CurrencySearchEntry(p, self.ctx, initial_code=acc.currency.code))
         attach_currency_tooltip(cur_c, self.ctx)
 
         desc_t = modal.add_field("Description", lambda p: make_textbox(p, height=60))
@@ -357,6 +355,7 @@ class AccountsPanel(ctk.CTkFrame):
             if not name:
                 messagebox.showerror("Error", "Account name is required.", parent=modal)
                 return
+            cur_c.resolve()
             try:
                 atype = next(t for t in AccountType if t.value == type_c.get())
                 kwargs = dict(

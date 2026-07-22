@@ -16,7 +16,7 @@ from src.models.database import (
 from src.ui.widgets import (
     SectionHeader, StatCard, DataTable, Modal,
     make_entry, make_combo, make_textbox, fmt_money,
-    attach_currency_tooltip, AttachmentSection
+    attach_currency_tooltip, AttachmentSection, CurrencySearchEntry
 )
 from src.ui.theme import theme
 
@@ -278,7 +278,6 @@ class OpportunitiesPanel(ctk.CTkFrame):
     def _opportunity_modal(self, opp):
         is_edit = opp is not None
         modal = Modal(self, "Edit Opportunity" if is_edit else "New Opportunity", width=520, height=760)
-        currencies = [c.code for c in self.ctx.currency.get_all()]
         categories = [c.value for c in OpportunityCategory]
         directions = [d.value for d in OpportunityDirection]
         statuses   = [s.value for s in OpportunityStatus]
@@ -297,7 +296,7 @@ class OpportunitiesPanel(ctk.CTkFrame):
         val_inner.pack(fill="x", pady=(2, 0))
         val_e = make_entry(val_inner, "e.g. 10000")
         val_e.pack(side="left", fill="x", expand=True, padx=(0, 4))
-        val_cur_c = make_combo(val_inner, currencies, width=90)
+        val_cur_c = CurrencySearchEntry(val_inner, self.ctx, width=90)
         val_cur_c.pack(side="left")
         attach_currency_tooltip(val_cur_c, self.ctx)
 
@@ -344,6 +343,7 @@ class OpportunitiesPanel(ctk.CTkFrame):
                 return None
 
         def save():
+            val_cur_c.resolve()
             try:
                 title = title_e.get().strip()
                 if not title:

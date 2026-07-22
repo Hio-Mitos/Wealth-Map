@@ -8,7 +8,7 @@ import customtkinter as ctk
 
 from src.ui.widgets import (
     SectionHeader, StatCard, Modal,
-    make_entry, make_combo, fmt_money, attach_currency_tooltip
+    make_entry, fmt_money, attach_currency_tooltip, CurrencySearchEntry
 )
 from src.ui.theme import theme
 
@@ -40,10 +40,9 @@ class ExchangePanel(ctk.CTkFrame):
         conv_body = ctk.CTkFrame(conv_card, fg_color="transparent")
         conv_body.pack(fill="x", padx=16, pady=(0, 16))
 
-        currencies = [c.code for c in self.ctx.currency.get_all()]
         self._conv_amt  = make_entry(conv_body, "Amount", width=140)
-        self._conv_from = make_combo(conv_body, currencies, width=100)
-        self._conv_to   = make_combo(conv_body, currencies, width=100)
+        self._conv_from = CurrencySearchEntry(conv_body, self.ctx, width=100, initial_code="USD")
+        self._conv_to   = CurrencySearchEntry(conv_body, self.ctx, width=100, initial_code="EUR")
         self._conv_result = ctk.CTkLabel(conv_body, text="", font=("Segoe UI", 20, "bold"),
                                           text_color=theme.GOLD, width=200)
 
@@ -58,9 +57,6 @@ class ExchangePanel(ctk.CTkFrame):
                       font=("Segoe UI", 12), command=self._convert).pack(side="left", padx=8)
         self._conv_result.pack(side="left", padx=16)
 
-        self._conv_from.set("USD")
-        self._conv_to.set("EUR")
-
         # Manual rate setter
         manual_card = ctk.CTkFrame(scroll, fg_color=theme.BG_CARD, corner_radius=12,
                                    border_width=1, border_color=theme.BORDER)
@@ -70,10 +66,9 @@ class ExchangePanel(ctk.CTkFrame):
 
         man_body = ctk.CTkFrame(manual_card, fg_color="transparent")
         man_body.pack(fill="x", padx=16, pady=(0, 16))
-        self._man_from = make_combo(man_body, currencies, width=90)
-        self._man_to   = make_combo(man_body, currencies, width=90)
+        self._man_from = CurrencySearchEntry(man_body, self.ctx, width=90, initial_code="USD")
+        self._man_to   = CurrencySearchEntry(man_body, self.ctx, width=90, initial_code="GBP")
         self._man_rate = make_entry(man_body, "Rate", width=120)
-        self._man_from.set("USD"); self._man_to.set("GBP")
 
         self._man_from.pack(side="left", padx=(0, 8))
         attach_currency_tooltip(self._man_from, self.ctx)
@@ -133,6 +128,8 @@ class ExchangePanel(ctk.CTkFrame):
 
     def _convert(self):
         try:
+            self._conv_from.resolve()
+            self._conv_to.resolve()
             amt  = float(self._conv_amt.get().replace(",", ""))
             from_code = self._conv_from.get()
             to_code   = self._conv_to.get()
@@ -149,6 +146,8 @@ class ExchangePanel(ctk.CTkFrame):
 
     def _set_manual_rate(self):
         try:
+            self._man_from.resolve()
+            self._man_to.resolve()
             rate = float(self._man_rate.get())
             self.ctx.currency.set_manual_rate(self._man_from.get(), self._man_to.get(), rate)
             messagebox.showinfo("Rate Set", "Manual rate saved successfully.")
