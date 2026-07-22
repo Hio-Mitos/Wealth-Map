@@ -514,6 +514,69 @@ class Receipt(Base):
                                cascade="all, delete-orphan")
 
 
+class Employee(Base):
+    """
+    Business-profile employee directory entry, including a base
+    salary/currency/pay-frequency template used to pre-fill payslip
+    generation (see EmployeeCompLine for the recurring standard
+    earning/deduction lines beyond base salary, and Payslip.employee_id /
+    Payslip.is_generated for the payslips actually generated for them).
+    """
+    __tablename__ = "employees"
+
+    PAY_FREQUENCIES = ("monthly", "semi_monthly", "biweekly", "weekly")
+
+    id             = Column(Integer, primary_key=True)
+    employee_code  = Column(String(50), default="")
+    name           = Column(String(200), nullable=False)
+    position       = Column(String(150), default="")
+    department_id  = Column(Integer, ForeignKey("departments.id"), nullable=True)
+    email          = Column(String(200), default="")
+    phone          = Column(String(50), default="")
+    hire_date      = Column(DateTime, nullable=True)
+    is_active      = Column(Boolean, default=True)
+    base_salary    = Column(Float, default=0.0)
+    currency_id    = Column(Integer, ForeignKey("currencies.id"), nullable=True)
+    pay_frequency  = Column(String(20), default="monthly")   # one of PAY_FREQUENCIES
+    notes          = Column(Text, default="")
+    created_at     = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    department  = relationship("Department")
+    currency    = relationship("Currency")
+    comp_lines  = relationship("EmployeeCompLine", back_populates="employee",
+                               cascade="all, delete-orphan", order_by="EmployeeCompLine.id")
+    payslips    = relationship("Payslip", back_populates="employee")
+
+    def __repr__(self):
+        return f"<Employee {self.name}>"
+
+
+class EmployeeCompLine(Base):
+    """
+    One recurring line in an employee's standard compensation template —
+    an allowance/extra earning, or a standard deduction (statutory
+    contribution, etc.) beyond base salary — used to pre-fill each
+    generated payslip so only period-specific adjustments (overtime,
+    one-off deductions) need to be entered by hand.
+    """
+    __tablename__ = "employee_comp_lines"
+
+    SECTIONS = ("earning", "deduction")
+
+    id          = Column(Integer, primary_key=True)
+    employee_id = Column(Integer, ForeignKey("employees.id"), nullable=False)
+    section     = Column(String(20), nullable=False)   # 'earning' | 'deduction'
+    label       = Column(String(200), nullable=False)
+    amount      = Column(Float, default=0.0)
+    taxable     = Column(Boolean, default=True)         # only meaningful for section='earning'
+    created_at  = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    employee = relationship("Employee", back_populates="comp_lines")
+
+    def __repr__(self):
+        return f"<EmployeeCompLine {self.label} {self.amount}>"
+
+
 class Payslip(Base):
     """
     A full structured archive of one imported payslip — every taxable and
@@ -541,8 +604,17 @@ class Payslip(Base):
     net_pay           = Column(Float, default=0.0)
     source_filename   = Column(String(300), default="")
     created_at        = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    # Business profiles: set when this payslip was *generated* here (for
+    # an Employee) rather than imported from a document. `employee_id`
+    # links it back to the employee it's for, so the same payslip
+    # infrastructure (viewer, PDF export, YTD, cashflow report) works for
+    # both a personal user's own imported payslips and a business's
+    # generated ones.
+    employee_id       = Column(Integer, ForeignKey("employees.id"), nullable=True)
+    is_generated       = Column(Boolean, default=False)
 
     account      = relationship("Account")
+    employee     = relationship("Employee", back_populates="payslips")
     line_items   = relationship("PayslipLineItem", back_populates="payslip",
                                 cascade="all, delete-orphan",
                                 order_by="PayslipLineItem.id")
@@ -603,6 +675,14 @@ class Bill(Base):
     notes        = Column(Text, default="")
     is_active    = Column(Boolean, default=True)
     created_at   = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    # Set only when this bill was auto-created *for* a payslip import (a
+    # bill-kind deduction with no existing bill of that name to reuse).
+    # Later payslips that pay the SAME bill just add another payment
+    # transaction to it — they don't change this. Lets deleting the
+    # payslip that originally created the bill remove it entirely, but
+    # only once its own reversed payment leaves the bill with no other
+    # payment history (see PayslipService.delete_cascade).
+    payslip_id   = Column(Integer, ForeignKey("payslips.id"), nullable=True)
 
     currency     = relationship("Currency")
     account      = relationship("Account")
@@ -783,6 +863,9 @@ _MIGRATIONS = {
         ("fee_amount", "FLOAT DEFAULT 0.0"),
         ("payslip_id", "INTEGER"),
     ],
+    "bills": [
+        ("payslip_id", "INTEGER"),
+    ],
     "attachments": [
         ("opportunity_id", "INTEGER"),
         ("asset_id",       "INTEGER"),
@@ -790,6 +873,10 @@ _MIGRATIONS = {
     ],
     "payslip_line_items": [
         ("transaction_id", "INTEGER"),
+    ],
+    "payslips": [
+        ("employee_id",  "INTEGER"),
+        ("is_generated", "BOOLEAN DEFAULT 0"),
     ],
     "portfolio_assets": [
         ("price_source",      "VARCHAR(30) DEFAULT 'manual'"),

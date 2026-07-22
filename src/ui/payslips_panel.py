@@ -22,6 +22,7 @@ from src.ui.widgets import (safe_rebuild,
     SectionHeader, StatCard, Modal, make_entry, fmt_money_base)
 from src.ui.theme import theme
 from src.ui.payslip_dialog import open_payslip_import_dialog, show_payslip_viewer
+from src.ui.payslip_generate_dialog import open_generate_payslip_dialog
 
 SECTION_TITLES = {
     "taxable_earning":     "💰 Taxable Earnings",
@@ -45,12 +46,21 @@ class PayslipsPanel(ctk.CTkFrame):
         scroll.pack(fill="both", expand=True, padx=24, pady=16)
         scroll.grid_columnconfigure(0, weight=1)
 
-        SectionHeader(scroll, "Payslips",
-                      "Grouped by year, with a live year-to-date summary that "
-                      "updates whenever a payslip is added",
-                      "📄 Import Payslip", self._import_payslip,
-                      extra_buttons=[("📈 Cashflow Report", self._cashflow_report)]
-                      ).grid(row=0, column=0, sticky="ew", pady=(0, 16))
+        is_business = getattr(self.ctx, "is_business", False)
+        if is_business:
+            SectionHeader(scroll, "Payslips",
+                          "Generated for your employees, grouped by year with a live "
+                          "year-to-date summary",
+                          "🧾 Generate Payslip", self._generate_payslip,
+                          extra_buttons=[("📈 Payslip Cashflow Report", self._cashflow_report)]
+                          ).grid(row=0, column=0, sticky="ew", pady=(0, 16))
+        else:
+            SectionHeader(scroll, "Payslips",
+                          "Grouped by year, with a live year-to-date summary that "
+                          "updates whenever a payslip is added",
+                          "📄 Import Payslip", self._import_payslip,
+                          extra_buttons=[("📈 Payslip Cashflow Report", self._cashflow_report)]
+                          ).grid(row=0, column=0, sticky="ew", pady=(0, 16))
 
         payslips = self.ctx.payslip.get_all()
 
@@ -73,7 +83,10 @@ class PayslipsPanel(ctk.CTkFrame):
                  ).grid(row=0, column=2, sticky="ew")
 
         if not payslips:
-            ctk.CTkLabel(scroll, text="No payslips imported yet — click \"Import Payslip\" to get started.",
+            empty_msg = ('No payslips generated yet — click "Generate Payslip" to get started.'
+                        if is_business else
+                        'No payslips imported yet — click "Import Payslip" to get started.')
+            ctk.CTkLabel(scroll, text=empty_msg,
                          text_color=theme.TEXT_SEC, font=("Segoe UI", 13)).grid(
                 row=2, column=0, pady=40)
             return
@@ -142,18 +155,47 @@ class PayslipsPanel(ctk.CTkFrame):
                       command=lambda p=p: self._delete_payslip(p)
                       ).pack(side="right", padx=(0, 8))
 
+        ctk.CTkButton(body, text="📄", width=32, height=32,
+                      fg_color="transparent", hover_color=theme.BG_HOVER,
+                      text_color=theme.ACCENT, font=("Segoe UI", 13),
+                      command=lambda p=p: self._export_payslip_pdf(p)
+                      ).pack(side="right", padx=(0, 4))
+
         def _click(event, p=p):
             self._view(p)
         for w in (card, body, left, right, *left.winfo_children(), *right.winfo_children()):
             w.bind("<Button-1>", _click)
 
+    def _export_payslip_pdf(self, p):
+        from src.services.report_generators import PayslipDocument
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_name = (p.employee_name or "Payslip").replace(" ", "_")
+        path = filedialog.asksaveasfilename(
+            title="Save payslip as…", defaultextension=".pdf",
+            initialfile=f"Payslip_{safe_name}_{ts}.pdf",
+            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            out = PayslipDocument().generate(self.ctx, p, path)
+        except Exception as e:
+            messagebox.showerror("Export Failed", str(e), parent=self)
+            return
+        if messagebox.askyesno("Payslip Ready", f"Saved to:\n{out}\n\nOpen it now?", parent=self):
+            try:
+                os.startfile(out)  # Windows
+            except Exception:
+                import webbrowser
+                webbrowser.open(f"file://{out}")
+
     def _delete_payslip(self, p):
-        from src.models.database import LoanRepayment, PersonalLoan
+        from src.models.database import LoanRepayment, PersonalLoan, Transaction, Bill
         n = len(p.transactions)
         period = ""
         if p.period_start:
             period = f" ({p.period_start.strftime('%b %Y')})"
 
+        # ── Preview: Loans impact ───────────────────────────────────────
         repayments = self.ctx.session.query(LoanRepayment).filter_by(payslip_id=p.id).all()
         auto_loans = self.ctx.session.query(PersonalLoan).filter_by(payslip_id=p.id).all()
         loan_lines = []
@@ -169,12 +211,36 @@ class PayslipsPanel(ctk.CTkFrame):
                 loan_lines.append(f"     −  \"{loan.contact_name}\" will have "
                                   f"{rep.amount:,.2f} un-repaid (reversed)")
 
-        loan_block = ""
         if repayments:
             loan_block = ("  •  its footprint in the Loans tab will be undone:\n" +
                           "\n".join(loan_lines) + "\n")
         else:
             loan_block = "  •  (no linked loan activity to undo)\n"
+
+        # ── Preview: Bills impact ────────────────────────────────────────
+        bill_txs = (self.ctx.session.query(Transaction)
+                   .filter_by(payslip_id=p.id).filter(Transaction.bill_id.isnot(None)).all())
+        affected_bill_ids = {tx.bill_id for tx in bill_txs}
+        bill_lines = []
+        for bid in affected_bill_ids:
+            bill = self.ctx.session.query(Bill).get(bid)
+            if not bill:
+                continue
+            this_payslip_payment_ids = {tx.id for tx in bill_txs if tx.bill_id == bid}
+            total_payments = self.ctx.session.query(Transaction).filter_by(bill_id=bid).count()
+            other_payments = total_payments - len(this_payslip_payment_ids)
+            if bill.payslip_id == p.id and other_payments == 0:
+                bill_lines.append(f"     −  \"{bill.name}\" will be REMOVED entirely "
+                                  f"(it only exists because of this payslip)")
+            else:
+                bill_lines.append(f"     −  \"{bill.name}\" payment will be reversed "
+                                  "(due date reverts to its previous schedule)")
+
+        if bill_lines:
+            bill_block = ("  •  its footprint in the Bills tab will be undone:\n" +
+                          "\n".join(bill_lines) + "\n")
+        else:
+            bill_block = "  •  (no linked bill activity to undo)\n"
 
         msg = (
             f"Deleting this payslip{period} will permanently remove "
@@ -185,6 +251,7 @@ class PayslipsPanel(ctk.CTkFrame):
             "     (your account balance will change accordingly)\n"
             "  •  the tax records in the Taxes tab that came from it\n"
             f"{loan_block}"
+            f"{bill_block}"
             "  •  the attached payslip PDF\n\n"
             "This cannot be undone. Delete everything related to this payslip?"
         )
@@ -201,6 +268,8 @@ class PayslipsPanel(ctk.CTkFrame):
             parts.append(f"{result['repayments_reversed']} loan repayment(s) reversed")
         if result["loans_removed"]:
             parts.append(f"{result['loans_removed']} loan(s) removed")
+        if result.get("bills_removed"):
+            parts.append(f"{result['bills_removed']} bill(s) removed")
         messagebox.showinfo("Payslip Deleted",
                             "Payslip and " + ", ".join(parts) + " were removed.",
                             parent=self)
@@ -378,6 +447,9 @@ class PayslipsPanel(ctk.CTkFrame):
 
     def _import_payslip(self):
         open_payslip_import_dialog(self, self.ctx, on_done=lambda: (self.app.refresh(), self._rebuild()))
+
+    def _generate_payslip(self):
+        open_generate_payslip_dialog(self, self.ctx, on_done=lambda: (self.app.refresh(), self._rebuild()))
 
     def _rebuild(self):
         safe_rebuild(self, self._build)

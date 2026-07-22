@@ -90,14 +90,64 @@ class BillsPanel(ctk.CTkFrame):
         if self._show_inactive:
             self._inactive_switch.select()
 
-        for bill in bills:
-            self._render_bill_card(scroll, bill, now)
+        # ── Group bills by due month/year, earliest first ─────────────────
+        scheduled = [b for b in bills if b.is_active and b.next_due]
+        no_due = [b for b in bills if b.is_active and not b.next_due]
+        inactive = [b for b in bills if not b.is_active]
+
+        groups = {}
+        for b in scheduled:
+            key = (b.next_due.year, b.next_due.month)
+            groups.setdefault(key, []).append(b)
+        for key in groups:
+            groups[key].sort(key=lambda b: b.next_due)
+
+        for (year, month) in sorted(groups.keys()):
+            month_bills = groups[(year, month)]
+            self._render_month_band(scroll, year, month, month_bills, to_base, sym, now)
+            for b in month_bills:
+                self._render_bill_card(scroll, b, now)
+
+        if no_due:
+            self._render_group_band(scroll, "📌 No Due Date Set", no_due, to_base, sym)
+            for b in no_due:
+                self._render_bill_card(scroll, b, now)
+
+        if self._show_inactive and inactive:
+            self._render_group_band(scroll, "⏸ Inactive", inactive, to_base, sym)
+            for b in inactive:
+                self._render_bill_card(scroll, b, now)
 
         if not bills:
             ctk.CTkLabel(scroll, text="No bills yet — add rent, utilities, or subscriptions "
                                       "to keep track of what's due.",
                          text_color=theme.TEXT_SEC, font=("Segoe UI", 13)).grid(
                 row=scroll.grid_size()[1], column=0, pady=40)
+
+    def _render_month_band(self, scroll, year, month, month_bills, to_base, sym, now):
+        import calendar
+        label = f"📆 {calendar.month_name[month]} {year}"
+        is_past = (year, month) < (now.year, now.month)
+        total = sum(to_base(b) for b in month_bills)
+        subtitle = (f"{len(month_bills)} bill(s)  •  {sym}{total:,.2f} due" +
+                   ("  •  in the past" if is_past else ""))
+        self._render_band(scroll, label, subtitle,
+                          theme.RED if is_past else theme.TEXT_PRI)
+
+    def _render_group_band(self, scroll, label, group_bills, to_base, sym):
+        total = sum(to_base(b) for b in group_bills)
+        subtitle = f"{len(group_bills)} bill(s)  •  {sym}{total:,.2f}"
+        self._render_band(scroll, label, subtitle, theme.TEXT_PRI)
+
+    def _render_band(self, scroll, label, subtitle, title_color):
+        band = ctk.CTkFrame(scroll, fg_color=theme.BG_HOVER, corner_radius=10)
+        band.grid(row=scroll.grid_size()[1], column=0, sticky="ew", pady=(14, 8))
+        left = ctk.CTkFrame(band, fg_color="transparent")
+        left.pack(side="left", padx=14, pady=10, fill="x")
+        ctk.CTkLabel(left, text=label, font=("Segoe UI", 16, "bold"),
+                     text_color=title_color).pack(anchor="w")
+        ctk.CTkLabel(left, text=subtitle, font=("Segoe UI", 11),
+                     text_color=theme.TEXT_SEC).pack(anchor="w")
 
     def _render_bill_card(self, scroll, bill, now):
         cur = bill.currency

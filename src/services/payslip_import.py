@@ -65,9 +65,15 @@ STATUTORY_DEDUCTION_LABELS = {
 # — imported as expense transactions linked to a Bill record in the Bills
 # tab (auto-created on first import), so each keeps its payment history.
 BILL_DEDUCTION_LABELS = {
-    "SSS CONTRIBUTION", "PHILHEALTH CONTRIBUTION", "SSS WISP",
-    "ESPP DEDUCTION", "HDMF",
+    "SSS CONTRIBUTION", "PHILHEALTH CONTRIBUTION", "SSS WISP", "HDMF",
 }
+
+# Deduction labels that fund an employee stock purchase (ESPP) — money that
+# went toward buying company shares, not a bill or a tax. Imported as an
+# Investment transaction and flagged for the Portfolio tab rather than
+# Bills, since it represents a contribution toward an asset the employee
+# now (partly) owns.
+INVESTMENT_DEDUCTION_LABELS = {"ESPP DEDUCTION"}
 
 
 def _num(text: Optional[str]) -> float:
@@ -158,7 +164,8 @@ def parse_payslip_pdf(path) -> Dict[str, Any]:
       "period_end": datetime | None,
       "taxable_earnings": [{"label", "hours", "amount"}, ...],
       "non_taxable_earnings": [...],
-      "deductions": [{"label", "amount", "is_loan", "is_statutory", "is_bill"}, ...],
+      "deductions": [{"label", "amount", "is_loan", "is_statutory",
+                      "is_bill", "is_investment"}, ...],
       "totals": {"taxable": float, "non_taxable": float, "deductions": float},
       "loan_balances": [{"label", "amount"}, ...],
       "ytd_summary": [{"label", "amount"}, ...],
@@ -263,6 +270,7 @@ def parse_payslip_pdf(path) -> Dict[str, Any]:
             "is_loan": norm in LOAN_DEDUCTION_LABELS,
             "is_statutory": norm in STATUTORY_DEDUCTION_LABELS,
             "is_bill": norm in BILL_DEDUCTION_LABELS,
+            "is_investment": norm in INVESTMENT_DEDUCTION_LABELS,
         })
 
     # ── Totals row for the top table band ───────────────────────────────

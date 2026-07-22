@@ -157,8 +157,10 @@ def _show_review_modal(parent, ctx, parsed, on_done=None):
 
             kind_c2 = None
             if show_kind:
-                kind_c2 = make_combo(top_row, ["Fee", "Tax", "Bill"], width=75)
-                if d.get("is_bill"):
+                kind_c2 = make_combo(top_row, ["Fee", "Tax", "Bill", "Investment"], width=90)
+                if d.get("is_investment"):
+                    kind_c2.set("Investment")
+                elif d.get("is_bill"):
                     kind_c2.set("Bill")
                 elif d.get("is_statutory"):
                     kind_c2.set("Tax")
@@ -216,8 +218,9 @@ def _show_review_modal(parent, ctx, parsed, on_done=None):
                 "taxable_earning", parsed.get("taxable_earnings", []))
     add_section("🧾 Non-Taxable Earnings (each becomes its own Salary transaction)",
                 "non_taxable_earning", parsed.get("non_taxable_earnings", []))
-    add_section("💸 Deductions (each becomes its own transaction — Fee, Tax, or Bill; "
-                "Bill-kind ones link to the Bills tab, loan-linked ones also record a repayment)",
+    add_section("💸 Deductions (each becomes its own transaction — Fee, Tax, Bill, or "
+                "Investment; Bill-kind ones link to the Bills tab, Investment-kind ones are "
+                "for share purchases like ESPP, loan-linked ones also record a repayment)",
                 "deduction", parsed.get("deductions", []), show_kind=True, show_loan=True)
 
     total_earn = sum(d["amount"] for d in parsed.get("taxable_earnings", [])) + \
@@ -320,11 +323,19 @@ def _show_review_modal(parent, ctx, parsed, on_done=None):
                             payee=parsed.get("company", ""),
                             category="Payroll Contribution",
                             notes=f"Auto-created from payslip import ({period_label})",
+                            payslip_id=payslip.id,
                         )
                         bills_cache[desc.strip().lower()] = bill
                     category = bill.category or category
                 elif kind == "Tax":
                     tx_type, category = TransactionType.TAX, "Payroll Deduction"
+                elif kind == "Investment":
+                    # Money that funded an employee stock purchase (ESPP) —
+                    # this app can't record the actual share trade from a
+                    # payslip alone (no price/quantity), so it's recorded
+                    # as an Investment transaction and left for the user to
+                    # match against the resulting purchase in Portfolio.
+                    tx_type, category = TransactionType.INVESTMENT, "Portfolio / ESPP Contribution"
                 else:
                     tx_type, category = TransactionType.FEE, "Payroll Deduction"
 
@@ -335,6 +346,9 @@ def _show_review_modal(parent, ctx, parsed, on_done=None):
                     currency_code=currency_code,
                     payslip_id=payslip.id,
                     bill_id=bill.id if bill else None,
+                    notes=("Funded an employee stock purchase — record the resulting share "
+                           "trade in Portfolio once you know the purchase price/quantity."
+                           if kind == "Investment" else ""),
                 )
                 ctx.payslip.add_item(payslip, "deduction", desc, amt, transaction=ded_tx)
                 if bill is not None:
@@ -549,6 +563,38 @@ def show_payslip_viewer(parent, payslip, ctx=None, app=None):
                 open_transaction_modal(modal, ctx, app, tx)
 
     _render_payslip_sections(modal.body, payslip, on_open_transaction=on_open_tx, ctx=ctx)
+
+    if ctx is not None:
+        def _export_pdf():
+            from tkinter import filedialog, messagebox as _mb
+            from datetime import datetime as _dt2
+            from src.services.report_generators import PayslipDocument
+            ts = _dt2.now().strftime("%Y%m%d_%H%M%S")
+            safe_name = (payslip.employee_name or "Payslip").replace(" ", "_")
+            path = filedialog.asksaveasfilename(
+                title="Save payslip as…", defaultextension=".pdf",
+                initialfile=f"Payslip_{safe_name}_{ts}.pdf",
+                filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")], parent=modal)
+            if not path:
+                return
+            try:
+                out = PayslipDocument().generate(ctx, payslip, path)
+            except Exception as e:
+                _mb.showerror("Export Failed", str(e), parent=modal)
+                return
+            if _mb.askyesno("Payslip Ready", f"Saved to:\n{out}\n\nOpen it now?", parent=modal):
+                try:
+                    import os as _os
+                    _os.startfile(out)  # Windows
+                except Exception:
+                    import webbrowser
+                    webbrowser.open(f"file://{out}")
+
+        ctk.CTkButton(
+            modal.footer, text="📄 Export PDF", command=_export_pdf,
+            fg_color="transparent", border_color=theme.BORDER, border_width=1,
+            text_color=theme.ACCENT, font=("Segoe UI", 12), height=36, width=130
+        ).pack(side="left", padx=(16, 6), pady=12)
 
     ctk.CTkButton(
         modal.footer, text="Close", command=modal.destroy,

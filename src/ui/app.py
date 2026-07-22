@@ -37,6 +37,7 @@ NAV_ITEMS_BUSINESS = [
     ("🏦",  "Accounts",     "accounts"),
     ("↕",   "Transactions", "transactions"),
     ("🏢",  "Departments",  "departments"),
+    ("👥",  "Employees",    "employees"),
     ("📈",  "Portfolio",    "portfolio"),
     ("📑",  "Receivables & Payables", "loans"),
     ("🧾",  "Receipts",     "receipts"),
@@ -424,6 +425,9 @@ class WealthMapApp(ctk.CTk):
         elif key == "departments":
             from src.ui.departments import DepartmentsPanel
             return DepartmentsPanel(self.content_frame, self.ctx, self)
+        elif key == "employees":
+            from src.ui.employees_panel import EmployeesPanel
+            return EmployeesPanel(self.content_frame, self.ctx, self)
         elif key == "cashflow":
             from src.ui.cashflow import CashFlowPanel
             return CashFlowPanel(self.content_frame, self.ctx, self)
