@@ -88,7 +88,11 @@ BACKUP_FOLDER_NAME = "WealthMap Backups"
 APPDATA_KEY_FILENAME = "wealthmap_key.txt"
 VERIFIER_PLAINTEXT = b"WEALTHMAP-BACKUP-OK"
 KDF_ITERATIONS = 390_000
-DEFAULT_RETAIN = 10
+# Exactly one backup file is kept in Google Drive at a time — each
+# successful backup uploads the new archive first, then _prune_old_backups()
+# deletes every older one, so there's never more than a single .wmb file
+# (briefly two, during the upload-then-prune window of a single run).
+DEFAULT_RETAIN = 1
 DEBOUNCE_SECONDS = 90
 DAILY_SECONDS = 24 * 60 * 60
 
@@ -588,7 +592,10 @@ class GoogleDriveBackupService:
         return results.get("files", [])
 
     def _prune_old_backups(self, drive, folder_id: str):
-        retain = self.config.get("retain_count", DEFAULT_RETAIN)
+        # Always keep exactly one backup file on Drive — ignore any stale
+        # `retain_count` a config file from an earlier version might still
+        # have on disk (it was never user-configurable in any UI).
+        retain = DEFAULT_RETAIN
         query = f"'{folder_id}' in parents and trashed = false"
         results = drive.files().list(
             q=query, orderBy="createdTime desc", fields="files(id,name)"

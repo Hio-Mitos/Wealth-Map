@@ -16,9 +16,10 @@ from src.models.database import TransactionType
 from src.ui.widgets import (safe_rebuild,
     SectionHeader, StatCard, Modal,
     make_entry, make_combo, make_textbox, fmt_money, fmt_money_base,
-    attach_currency_tooltip, CurrencySearchEntry
+    attach_currency_tooltip, CurrencySearchEntry, AttachmentSection
 )
 from src.ui.theme import theme
+from src.ui.bill_import_dialog import open_bill_import_dialog
 
 FREQ_LABELS = {
     "weekly":    "Weekly",
@@ -50,7 +51,8 @@ class BillsPanel(ctk.CTkFrame):
 
         SectionHeader(scroll, "Bills",
                       "Rent, utilities, subscriptions — what's due, when, and what you've paid",
-                      "＋ New Bill", self._open_new_bill
+                      "＋ New Bill", self._open_new_bill,
+                      extra_buttons=[("📥 Import Bill", self._import_bill)]
                       ).grid(row=0, column=0, sticky="ew", pady=(0, 16))
 
         bills = self.ctx.bill.get_all(include_inactive=self._show_inactive)
@@ -191,6 +193,16 @@ class BillsPanel(ctk.CTkFrame):
         if sub:
             ctk.CTkLabel(left, text=sub, font=("Segoe UI", 11),
                          text_color=theme.TEXT_SEC).pack(anchor="w")
+        detail_bits = []
+        if bill.account_number:
+            detail_bits.append(f"Acct # {bill.account_number}")
+        if bill.meter_number:
+            detail_bits.append(f"Meter {bill.meter_number}")
+        if bill.consumption:
+            detail_bits.append(f"{bill.consumption:g} {bill.consumption_unit}".strip())
+        if detail_bits:
+            ctk.CTkLabel(left, text="  •  ".join(detail_bits), font=("Segoe UI", 10),
+                         text_color=theme.TEXT_SEC).pack(anchor="w")
         if bill.last_paid_on:
             ctk.CTkLabel(left, text=f"Last paid {bill.last_paid_on.strftime('%d %b %Y')}"
                                     f"  ({len(bill.transactions)} payment(s) recorded)",
@@ -218,6 +230,9 @@ class BillsPanel(ctk.CTkFrame):
                       fg_color="transparent", border_color=theme.BORDER, border_width=1,
                       text_color=theme.TEXT_SEC, font=("Segoe UI", 11),
                       command=lambda b=bill: self._edit_bill(b)).pack(side="left", padx=6)
+
+    def _import_bill(self):
+        open_bill_import_dialog(self, self.ctx, on_done=lambda: (self.app.refresh(), self._rebuild()))
 
     def _toggle_inactive(self):
         self._show_inactive = not self._show_inactive
@@ -343,7 +358,7 @@ class BillsPanel(ctk.CTkFrame):
             return
         acc_names = [a.name for a in accounts]
 
-        modal = Modal(self, f"Pay Bill — {bill.name}", width=440, height=460)
+        modal = Modal(self, f"Pay Bill — {bill.name}", width=440, height=620)
         cur = bill.currency
         code = cur.code if cur else self.ctx.settings.get("base_currency", "USD")
 
@@ -356,12 +371,19 @@ class BillsPanel(ctk.CTkFrame):
         date_e.insert(0, datetime.now().strftime("%Y-%m-%d"))
         notes_e = modal.add_field("Notes", lambda p: make_entry(p, "Optional"))
 
+        # Proof of payment — one or more receipts/screenshots can be
+        # attached here; staged until the payment transaction exists, then
+        # uploaded and linked to it (so "Payment History" can show them).
+        receipts = AttachmentSection(modal.body, self.ctx, "transaction", entity=None,
+                                     title="🧾 Proof of Payment (receipts)")
+        receipts.pack(fill="x")
+
         def save():
             try:
                 account = next((a for a in accounts if a.name == acc_c.get()), None)
                 amount = float(amt_e.get().replace(",", ""))
                 paid_on = datetime.strptime(date_e.get().strip(), "%Y-%m-%d")
-                self.ctx.transaction.add(
+                tx = self.ctx.transaction.add(
                     account, TransactionType.EXPENSE, amount,
                     description=f"Bill — {bill.name}",
                     category=bill.category or "Bills & Utilities",
@@ -371,6 +393,7 @@ class BillsPanel(ctk.CTkFrame):
                     notes=notes_e.get().strip(),
                     bill_id=bill.id,
                 )
+                receipts.commit(tx.id)
                 self.ctx.bill.record_payment(bill, paid_on=paid_on.replace(tzinfo=timezone.utc))
                 modal.destroy()
                 self.app.refresh()
@@ -399,8 +422,24 @@ class BillsPanel(ctk.CTkFrame):
                          anchor="w").pack(side="left", fill="x", expand=True)
             ctk.CTkLabel(row, text=f"−{fmt_money(tx.amount, sym)}",
                          font=("Segoe UI", 12, "bold"), text_color=theme.RED
-                         ).pack(side="right", padx=10)
+                         ).pack(side="right", padx=(0, 10))
+            if tx.attachments:
+                ctk.CTkButton(row, text=f"🧾 {len(tx.attachments)}", width=44, height=26,
+                              fg_color="transparent", border_color=theme.BORDER, border_width=1,
+                              text_color=theme.ACCENT, font=("Segoe UI", 11),
+                              command=lambda t=tx: self._show_receipts(modal, t)
+                              ).pack(side="right", padx=(0, 4))
 
+        modal.add_buttons("Close", modal.destroy, cancel_text="")
+        for child in list(modal.footer.winfo_children()):
+            if child.cget("text") == "":
+                child.destroy()
+
+    def _show_receipts(self, parent_modal, tx):
+        modal = Modal(parent_modal, "Proof of Payment", width=460, height=420)
+        section = AttachmentSection(modal.body, self.ctx, "transaction", entity=tx,
+                                    title="🧾 Receipts for this payment")
+        section.pack(fill="x")
         modal.add_buttons("Close", modal.destroy, cancel_text="")
         for child in list(modal.footer.winfo_children()):
             if child.cget("text") == "":

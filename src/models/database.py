@@ -684,9 +684,24 @@ class Bill(Base):
     # payment history (see PayslipService.delete_cascade).
     payslip_id   = Column(Integer, ForeignKey("payslips.id"), nullable=True)
 
+    # Structured details captured when a bill is created by importing a
+    # utility/statement PDF (see src/services/bill_import.py) rather than
+    # typed in manually — kept so the original account/meter/service
+    # details are always visible, not just the amount and due date.
+    account_number       = Column(String(100), default="")   # e.g. Customer Account No. (CAN)
+    meter_number          = Column(String(100), default="")
+    service_address       = Column(String(300), default="")
+    reference_no           = Column(String(100), default="")  # invoice/bill reference number
+    billing_period_start  = Column(DateTime, nullable=True)
+    billing_period_end    = Column(DateTime, nullable=True)
+    consumption            = Column(Float, nullable=True)       # e.g. kWh, cu.m., etc.
+    consumption_unit       = Column(String(20), default="")
+
     currency     = relationship("Currency")
     account      = relationship("Account")
     transactions = relationship("Transaction", back_populates="bill")
+    attachments  = relationship("Attachment", back_populates="bill",
+                                cascade="all, delete-orphan")
 
     def __repr__(self):
         return f"<Bill {self.name} {self.amount}>"
@@ -743,6 +758,7 @@ class Attachment(Base):
     opportunity_id   = Column(Integer, ForeignKey("opportunities.id"),  nullable=True)
     asset_id         = Column(Integer, ForeignKey("portfolio_assets.id"), nullable=True)
     payslip_id       = Column(Integer, ForeignKey("payslips.id"),       nullable=True)
+    bill_id          = Column(Integer, ForeignKey("bills.id"),          nullable=True)
 
     original_filename= Column(String(500), nullable=False)
     stored_filename  = Column(String(500), nullable=False)   # UUID-based on disk
@@ -762,6 +778,7 @@ class Attachment(Base):
     opportunity = relationship("Opportunity",    back_populates="attachments")
     asset       = relationship("PortfolioAsset", back_populates="attachments")
     payslip     = relationship("Payslip",        back_populates="attachments")
+    bill        = relationship("Bill",           back_populates="attachments")
 
 
 class AppSettings(Base):
@@ -865,11 +882,20 @@ _MIGRATIONS = {
     ],
     "bills": [
         ("payslip_id", "INTEGER"),
+        ("account_number",      "VARCHAR(100) DEFAULT ''"),
+        ("meter_number",        "VARCHAR(100) DEFAULT ''"),
+        ("service_address",     "VARCHAR(300) DEFAULT ''"),
+        ("reference_no",        "VARCHAR(100) DEFAULT ''"),
+        ("billing_period_start","DATETIME"),
+        ("billing_period_end",  "DATETIME"),
+        ("consumption",         "FLOAT"),
+        ("consumption_unit",    "VARCHAR(20) DEFAULT ''"),
     ],
     "attachments": [
         ("opportunity_id", "INTEGER"),
         ("asset_id",       "INTEGER"),
         ("payslip_id",     "INTEGER"),
+        ("bill_id",        "INTEGER"),
     ],
     "payslip_line_items": [
         ("transaction_id", "INTEGER"),

@@ -441,6 +441,23 @@ class CurrencyService:
             age = datetime.now(timezone.utc) - row.fetched_at.replace(tzinfo=timezone.utc)
             if age.total_seconds() < RATE_CACHE_MINUTES * 60:
                 return row.rate
+        # Rates are only ever fetched relative to a single "from" currency
+        # at a time (whichever one was the base currency when the fetch
+        # ran) — e.g. fetching with base=USD stores USD→PHP, not PHP→USD.
+        # If the app's base currency changes later, every conversion in
+        # that new direction would otherwise silently fail (falling back
+        # to an unconverted amount everywhere it's displayed) until the
+        # next fetch happens to use the new base. Falling back to the
+        # inverse of whatever *is* cached keeps conversions correct
+        # immediately, without needing a fresh network fetch.
+        inv_row = (self.db.query(ExchangeRate)
+                   .filter_by(base_currency_id=target.id, target_currency_id=base.id)
+                   .order_by(ExchangeRate.fetched_at.desc())
+                   .first())
+        if inv_row and inv_row.rate:
+            age = datetime.now(timezone.utc) - inv_row.fetched_at.replace(tzinfo=timezone.utc)
+            if age.total_seconds() < RATE_CACHE_MINUTES * 60:
+                return 1.0 / inv_row.rate
         return None
 
     def fetch_rates_online(self, base_code: str = "USD") -> Dict[str, float]:
@@ -1757,11 +1774,23 @@ class BillService:
                frequency: str = "monthly", next_due: Optional[datetime] = None,
                account: Optional[Account] = None, payee: str = "",
                category: str = "Bills & Utilities", notes: str = "",
-               payslip_id: Optional[int] = None) -> Bill:
+               payslip_id: Optional[int] = None,
+               account_number: str = "", meter_number: str = "",
+               service_address: str = "", reference_no: str = "",
+               billing_period_start: Optional[datetime] = None,
+               billing_period_end: Optional[datetime] = None,
+               consumption: Optional[float] = None,
+               consumption_unit: str = "") -> Bill:
         """`payslip_id`: set only when this bill is being auto-created for a
         payslip's bill-kind deduction (no existing bill of that name to
         reuse) — lets deleting that specific payslip remove the bill
-        entirely, but only once it has no other payment history."""
+        entirely, but only once it has no other payment history.
+
+        `account_number`/`meter_number`/`service_address`/`reference_no`/
+        `billing_period_*`/`consumption*`: filled in when the bill was
+        created from an imported utility statement PDF (see
+        src/services/bill_import.py) so the original account/meter/service
+        details stay visible rather than being lost after import."""
         cur = self.fx.get_by_code(currency_code)
         bill = Bill(
             name=name.strip(), amount=amount,
@@ -1772,11 +1801,30 @@ class BillService:
             category=category.strip() or "Bills & Utilities",
             notes=notes.strip(),
             payslip_id=payslip_id,
+            account_number=account_number.strip(),
+            meter_number=meter_number.strip(),
+            service_address=service_address.strip(),
+            reference_no=reference_no.strip(),
+            billing_period_start=billing_period_start,
+            billing_period_end=billing_period_end,
+            consumption=consumption,
+            consumption_unit=consumption_unit.strip(),
         )
         self.db.add(bill)
         self.db.commit()
         self.db.refresh(bill)
         return bill
+
+    def get_by_account_number(self, account_number: str) -> Optional[Bill]:
+        """Finds an existing bill by its provider account number (e.g. a
+        utility CAN) so re-importing the same account's statement updates
+        the same Bill record instead of creating a duplicate."""
+        account_number = (account_number or "").strip()
+        if not account_number:
+            return None
+        return (self.db.query(Bill)
+               .filter(Bill.account_number == account_number)
+               .first())
 
     def update(self, bill: Bill, **fields) -> Bill:
         if "currency_code" in fields:
@@ -1929,6 +1977,8 @@ class AttachmentService:
             att.asset_id = owner_id
         elif owner_type == "payslip":
             att.payslip_id = owner_id
+        elif owner_type == "bill":
+            att.bill_id = owner_id
 
         db.add(att)
         db.commit()

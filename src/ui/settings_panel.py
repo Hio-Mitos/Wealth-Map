@@ -487,6 +487,14 @@ class SettingsPanel(ctk.CTkFrame):
         self._base_combo.resolve()  # in case the field still has focus with unresolved search text
         code = self._base_combo.get()
         self.ctx.settings.set("base_currency", code)
+        # Exchange rates are cached relative to a single "from" currency at
+        # a time — refresh them for the new base right away so every
+        # amount shown in the new base currency actually gets converted
+        # instead of silently falling back to the raw unconverted number
+        # (get_rate() also now falls back to inverting whatever's already
+        # cached, so this is a belt-and-suspenders fetch, not a hard
+        # requirement — it just gets fresh rates sooner).
+        self.ctx.fetch_rates_background()
         self.app.refresh()
         messagebox.showinfo("Saved", f"Base currency set to {code}")
 
